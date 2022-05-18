@@ -1163,22 +1163,20 @@ class Client(SyncMethodMixin):
         elif self._start_arg is None:
             from distributed.deploy import LocalCluster
 
+            local_cluster = partial(
+                LocalCluster,
+                loop=self.loop,
+                asynchronous=self._asynchronous,
+                **self._startup_kwargs,
+            )
+
             try:
-                self.cluster = await LocalCluster(
-                    loop=self.loop,
-                    asynchronous=self._asynchronous,
-                    **self._startup_kwargs,
-                )
+                self.cluster = await local_cluster()
             except OSError as e:
                 if e.errno != errno.EADDRINUSE:
                     raise
                 # The default port was taken, use a random one
-                self.cluster = await LocalCluster(
-                    scheduler_port=0,
-                    loop=self.loop,
-                    asynchronous=True,
-                    **self._startup_kwargs,
-                )
+                self.cluster = await local_cluster(scheduler_port=0)
 
             address = self.cluster.scheduler_address
 
