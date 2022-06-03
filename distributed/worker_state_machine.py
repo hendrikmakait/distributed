@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import weakref
 from collections.abc import Callable, Container
 from copy import copy
 from dataclasses import dataclass, field
@@ -105,6 +106,8 @@ class TaskState:
     similar information on the scheduler side.
     """
 
+    _instances: ClassVar[weakref.WeakSet[TaskState]] = weakref.WeakSet()
+
     #: Task key. Mandatory.
     key: str
     #: A named tuple containing the ``function``, ``args``, ``kwargs`` and ``task``
@@ -169,6 +172,9 @@ class TaskState:
 
     # Support for weakrefs to a class with __slots__
     __weakref__: Any = field(init=False)
+
+    def __post_init__(self):
+        TaskState._instances.add(self)
 
     def __repr__(self) -> str:
         return f"<TaskState {self.key!r} {self.state}>"

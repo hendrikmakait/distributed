@@ -70,6 +70,7 @@ from distributed.utils import (
     sync,
 )
 from distributed.worker import WORKER_ANY_RUNNING, InvalidTransition, Worker
+from distributed.worker_state_machine import TaskState as WorkerTaskState
 
 try:
     import ssl
@@ -1841,6 +1842,8 @@ def check_instances():
         assert time() < start + 10
 
     _global_clients.clear()
+
+    assert not WorkerTaskState._instances
 
     for w in Worker._instances:
         with suppress(RuntimeError):  # closed IOLoop
