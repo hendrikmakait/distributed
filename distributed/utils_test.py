@@ -35,7 +35,7 @@ from tornado.ioloop import IOLoop
 
 import dask
 
-from distributed import Scheduler, system
+from distributed import Scheduler, profile, system
 from distributed import versions as version_module
 from distributed.client import Client, _global_clients, default_client
 from distributed.comm import Comm
@@ -1843,6 +1843,8 @@ def check_instances():
 
     _global_clients.clear()
 
+    with profile.lock:
+        gc.collect()
     assert not WorkerTaskState._instances
 
     for w in Worker._instances:
