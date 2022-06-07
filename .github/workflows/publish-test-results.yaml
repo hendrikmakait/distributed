@@ -39,7 +39,7 @@ jobs:
       - name: Publish Unit Test Results
         uses: EnricoMi/publish-unit-test-result-action@v1
         with:
-          check_name: Pytest Results
+          check_name: Pytest Results [Test Report](https://dask.org/distributed/test_report.html)
           commit: ${{ github.event.workflow_run.head_sha }}
           event_file: artifacts/Event File/event.json
           event_name: ${{ github.event.workflow_run.event }}
