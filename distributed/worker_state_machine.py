@@ -185,7 +185,7 @@ class TaskState:
         # When a task transitions to forgotten and exits Worker.tasks, it should be
         # immediately dereferenced. If the same task is recreated later on on the
         # worker, we should not have to deal with its previous incarnation lingering.
-        assert other is self
+        # assert other is self
         return True
 
     def __hash__(self) -> int:
