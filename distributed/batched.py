@@ -75,8 +75,7 @@ class BatchedSend:
 
     __str__ = __repr__
 
-    @gen.coroutine
-    def _background_send(self):
+    async def _background_send(self):
         while not self.please_stop:
             try:
                 yield self.waker.wait(self.next_deadline)
@@ -94,7 +93,7 @@ class BatchedSend:
             self.batch_count += 1
             self.next_deadline = time() + self.interval
             try:
-                nbytes = yield self.comm.write(
+                nbytes = await self.comm.write(
                     payload, serializers=self.serializers, on_error="raise"
                 )
                 if nbytes < 1e6:
