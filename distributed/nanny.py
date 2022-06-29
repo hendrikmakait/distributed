@@ -590,11 +590,8 @@ class Nanny(ServerNode):
         await asyncio.gather(*(td for td in teardowns if isawaitable(td)))
 
         self.stop()
-        try:
-            if self.process is not None:
-                await self.kill(timeout=timeout)
-        except Exception:
-            logger.exception("Error in Nanny killing Worker subprocess")
+        if self.process is not None:
+            await self.kill(timeout=timeout)
         self.process = None
         await self.rpc.close()
         self.status = Status.closed
@@ -655,9 +652,9 @@ class WorkerProcess:
         if self.status == Status.starting:
             await self.running.wait()
             return self.status
-
-        self.init_result_q = init_q = get_mp_context().Queue()
-        self.child_stop_q = get_mp_context().Queue()
+        mp_ctx = get_mp_context()
+        self.init_result_q = init_q = mp_ctx.Queue()
+        self.child_stop_q = mp_ctx.Queue()
         uid = uuid.uuid4().hex
 
         self.process = AsyncProcess(
@@ -698,6 +695,8 @@ class WorkerProcess:
             await self.process.terminate()
             self.status = Status.failed
             raise
+        finally:
+            init_q.close()
         if not msg:
             return self.status
         self.worker_address = msg["address"]
@@ -705,8 +704,6 @@ class WorkerProcess:
         assert self.worker_address
         self.status = Status.running
         self.running.set()
-
-        init_q.close()
 
         return self.status
 
@@ -771,11 +768,7 @@ class WorkerProcess:
         if self.status == Status.stopping:
             await self.stopped.wait()
             return
-        assert self.status in (
-            Status.starting,
-            Status.running,
-            Status.failed,  # process failed to start, but hasn't been joined yet
-        ), self.status
+        assert self.status in (Status.starting, Status.running)
         self.status = Status.stopping
         logger.info("Nanny asking worker to close")
 
@@ -791,9 +784,6 @@ class WorkerProcess:
                 "executor_wait": executor_wait,
             }
         )
-        await asyncio.sleep(0)  # otherwise we get broken pipe errors
-        queue.close()
-        del queue
 
         try:
             try:
@@ -825,7 +815,7 @@ class WorkerProcess:
                 continue
 
             if msg["uid"] != uid:  # ensure that we didn't cross queues
-                continue
+                raise RuntimeError("Encountered message from a different queue.")
 
             if "exception" in msg:
                 raise msg["exception"]
@@ -881,7 +871,6 @@ class WorkerProcess:
                     logger.error("Worker process died unexpectedly")
                     msg = {"op": "stop"}
                 finally:
-                    child_stop_q.close()
                     assert msg["op"] == "stop", msg
                     del msg["op"]
                     loop.add_callback(do_stop, **msg)
@@ -901,7 +890,6 @@ class WorkerProcess:
                 except Exception as e:
                     logger.exception("Failed to start worker")
                     init_result_q.put({"uid": uid, "exception": e})
-                    init_result_q.close()
                     # If we hit an exception here we need to wait for a least
                     # one interval for the outside to pick up this message.
                     # Otherwise we arrive in a race condition where the process
@@ -923,14 +911,12 @@ class WorkerProcess:
                                 "uid": uid,
                             }
                         )
-                        init_result_q.close()
                         await worker.finished()
                         logger.info("Worker closed")
 
         except Exception as e:
             logger.exception("Failed to initialize Worker")
             init_result_q.put({"uid": uid, "exception": e})
-            init_result_q.close()
             # If we hit an exception here we need to wait for a least one
             # interval for the outside to pick up this message. Otherwise we
             # arrive in a race condition where the process cleanup wipes the
@@ -948,10 +934,9 @@ class WorkerProcess:
                 # do_stop() explicitly.
                 loop.run_sync(do_stop)
             finally:
-                with suppress(ValueError):
-                    child_stop_q.put({"op": "stop"})  # usually redundant
-                with suppress(ValueError):
-                    child_stop_q.close()  # usually redundant
+                child_stop_q.put({"op": "stop"})
+                thread.join()
+                child_stop_q.close()
                 child_stop_q.join_thread()
                 thread.join(timeout=2)
 
