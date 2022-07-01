@@ -405,7 +405,6 @@ class Nanny(ServerNode):
             self.process = WorkerProcess(
                 worker_kwargs=worker_kwargs,
                 silence_logs=self.silence_logs,
-                on_exit=self._on_exit_sync,
                 worker=self.Worker,
                 env=self.env,
                 config=self.config,
@@ -496,9 +495,6 @@ class Nanny(ServerNode):
 
     def run(self, comm, *args, **kwargs):
         return run(self, comm, *args, **kwargs)
-
-    def _on_exit_sync(self, exitcode):
-        self._ongoing_background_tasks.call_soon(self._on_exit, exitcode)
 
     @log_errors
     async def _on_exit(self, exitcode):
@@ -609,7 +605,6 @@ class WorkerProcess:
         self,
         worker_kwargs,
         silence_logs,
-        on_exit,
         worker,
         env,
         config,
@@ -617,7 +612,6 @@ class WorkerProcess:
         self.status = Status.init
         self.silence_logs = silence_logs
         self.worker_kwargs = worker_kwargs
-        self.on_exit = on_exit
         self.process = None
         self.Worker = worker
         self.env = env
@@ -728,9 +722,6 @@ class WorkerProcess:
             if self.worker_dir and os.path.exists(self.worker_dir):
                 shutil.rmtree(self.worker_dir, ignore_errors=True)
             self.worker_dir = None
-            # User hook
-            if self.on_exit is not None:
-                self.on_exit(r)
 
     async def kill(self, timeout: float = 2, executor_wait: bool = True) -> None:
         """
