@@ -1991,6 +1991,8 @@ class WorkerState:
                 f"Tried to transition task {ts} to `memory` without data available"
             )
 
+        self._release_resources(ts)
+
         self.executing.discard(ts)
         self.in_flight_tasks.discard(ts)
         ts.coming_from = None
