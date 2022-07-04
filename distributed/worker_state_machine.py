@@ -1998,10 +1998,6 @@ class WorkerState:
                 f"Tried to transition task {ts} to `memory` without data available"
             )
 
-        if ts.resource_restrictions is not None:
-            for resource, quantity in ts.resource_restrictions.items():
-                self.available_resources[resource] += quantity
-
         self.executing.discard(ts)
         self.in_flight_tasks.discard(ts)
         ts.coming_from = None
