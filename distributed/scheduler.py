@@ -5091,7 +5091,7 @@ class Scheduler(SchedulerState, ServerNode):
         """Restart all workers. Reset local state."""
         stimulus_id = f"restart-{time()}"
         initial_workers = self._get_worker_ids()
-        n_workers = len(initial_workers)
+        n_restarting_workers = len(initial_workers)
 
         logger.info("Send lost future signal to clients")
         for cs in self.clients.values():
@@ -5133,13 +5133,13 @@ class Scheduler(SchedulerState, ServerNode):
             ]
 
             try:
-                resps = await asyncio.wait_for(
-                    asyncio.gather(
-                        *(
-                            nanny.restart(close=True, timeout=timeout * 0.8)
-                            for nanny in nannies
-                        )
-                    ),
+
+                async def _restart_nanny(nanny):
+                    response = await nanny.restart(close=True, timeout=timeout * 0.8)
+                    return response, nanny
+
+                nanny_results = await asyncio.wait_for(
+                    asyncio.gather(*(_restart_nanny(nanny) for nanny in nannies)),
                     timeout,
                 )
                 # NOTE: the `WorkerState` entries for these workers will be removed
@@ -5150,12 +5150,27 @@ class Scheduler(SchedulerState, ServerNode):
                     "timeout.  Continuing with restart process"
                 )
             else:
-                if not all(resp == "OK" for resp in resps):
+                failed_nannies = [
+                    nanny for response, nanny in nanny_results if response != "OK"
+                ]
+                if failed_nannies:
                     logger.error(
-                        "Not all workers responded positively: %s",
-                        resps,
+                        "%d workers did not respond positively: %s",
+                        len(failed_nannies),
+                        nanny_results,
                         exc_info=True,
                     )
+
+                    # Remove nannies that failed to restart. Their state is unclear and likely broken,
+                    # so we do not want to talk to them anymore. We also revise the count of workers
+                    # we expect to see running again.
+                    await asyncio.gather(
+                        *(
+                            self.remove_worker(address=addr, stimulus_id=stimulus_id)
+                            for addr in failed_nannies
+                        )
+                    )
+                    n_restarting_workers -= len(failed_nannies)
 
         self.clear_task_state()
 
@@ -5165,9 +5180,8 @@ class Scheduler(SchedulerState, ServerNode):
 
         self.log_event([client, "all"], {"action": "restart", "client": client})
         start = time()
-        while time() < start + 10 and (
-            len(self.workers) < n_workers or initial_workers & self._get_worker_ids()
-        ):
+        assert not initial_workers & self._get_worker_ids()
+        while time() < start + 10 and (len(self.running) < n_restarting_workers):
             await asyncio.sleep(0.01)
 
         self.report({"op": "restart"})
