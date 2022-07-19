@@ -94,7 +94,7 @@ class Nanny(ServerNode):
     """
 
     _instances: ClassVar[weakref.WeakSet[Nanny]] = weakref.WeakSet()
-    process = None
+    process: WorkerProcess | None
     memory_manager: NannyMemoryManager
 
     # Inputs to parse_ports()
@@ -145,6 +145,7 @@ class Nanny(ServerNode):
 
         self._setup_logging(logger)
         self.loop = self.io_loop = IOLoop.current()
+        self.process_initialized = asyncio.Event()
 
         if isinstance(security, dict):
             security = Security(**security)
@@ -375,9 +376,9 @@ class Nanny(ServerNode):
     async def wait_until_instantiated(self) -> Status:
         if not self._should_restart():
             return self.status
-        while self.process is None:
-            await asyncio.sleep(0.1)
-        await self.process.running.wait()  # type: ignore[unreachable]
+        await self.process_initialized.wait()
+        assert self.process is not None
+        await self.process.running.wait()
         return self.status
 
     async def instantiate(self) -> Status:
@@ -412,6 +413,7 @@ class Nanny(ServerNode):
                 env=self.env,
                 config=self.config,
             )
+            self.process_initialized.set()
 
         if self.death_timeout:
             try:
@@ -591,6 +593,7 @@ class Nanny(ServerNode):
         except Exception:
             pass
         self.process = None
+        self.process_initialized.clear()
         await self.rpc.close()
         self.status = Status.closed
         await super().close()
