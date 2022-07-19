@@ -374,13 +374,20 @@ class Nanny(ServerNode):
         deadline = time() + timeout
         await self.process.kill(timeout=0.8 * (deadline - time()))
 
-    async def wait_until_instantiated(self) -> Status:
+    async def wait_until_instantiated(self, timeout: int = 30) -> Status:
         if not self._should_restart():
             return self.status
-        await self.process_initialized.wait()
-        assert self.process is not None
-        await self.process.running.wait()
-        return self.status
+
+        async def _():
+            await self.process_initialized.wait()
+            assert self.process is not None
+            await self.process.running.wait()
+            return self.status
+
+        try:
+            return await asyncio.wait_for(_(), timeout=timeout)
+        except asyncio.TimeoutError:
+            raise TimeoutError(f"Worker process did not instantiate within {timeout}s")
 
     async def instantiate(self) -> Status:
         """Start a local worker process
