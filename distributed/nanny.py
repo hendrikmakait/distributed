@@ -15,7 +15,7 @@ from contextlib import suppress
 from inspect import isawaitable
 from queue import Empty
 from time import sleep as sync_sleep
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Literal
 
 from tornado import gen
 from tornado.ioloop import IOLoop
@@ -374,15 +374,28 @@ class Nanny(ServerNode):
         deadline = time() + timeout
         await self.process.kill(timeout=0.8 * (deadline - time()))
 
-    async def wait_until_instantiated(self, timeout: int = 30) -> Status:
-        if not self._should_restart():
-            return self.status
+    async def wait_until_instantiated(
+        self, timeout: int = 30
+    ) -> Literal["OK", "already-closed"]:
+        """Check if worker process will be instantiated and wait for that to happen.
+
+        If the worker process will be instantiated, this method waits until then and returns ``OK``.
+        If the nanny has already been closed and the process will not be instantiated again, returns ``already-closed`` without waiting.
+
+        Parameters
+        ----------
+        timeout:
+            How long to wait until the worker process is instantiated.
+            Raises `asyncio.TimeoutError` if this is exceeded.
+        """
 
         async def _():
+            if not self._should_restart():
+                return "already-closed"
             await self.process_initialized.wait()
             assert self.process is not None
             await self.process.running.wait()
-            return self.status
+            return "OK"
 
         try:
             return await asyncio.wait_for(_(), timeout=timeout)
@@ -768,8 +781,8 @@ class WorkerProcess:
             return
         assert self.status in (Status.starting, Status.running)
         assert self.running is not None
-        self.running.clear()
         self.status = Status.stopping
+        self.running.clear()
         logger.info("Nanny asking worker to close")
 
         process = self.process
