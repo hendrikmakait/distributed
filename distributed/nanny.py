@@ -146,6 +146,7 @@ class Nanny(ServerNode):
         self._setup_logging(logger)
         self.loop = self.io_loop = IOLoop.current()
         self.process_initialized = asyncio.Event()
+        self.process = None
 
         if isinstance(security, dict):
             security = Security(**security)
