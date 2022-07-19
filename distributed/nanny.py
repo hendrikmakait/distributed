@@ -242,6 +242,7 @@ class Nanny(ServerNode):
             "instantiate": self.instantiate,
             "kill": self.kill,
             "restart": self.restart,
+            "wait_until_instantiated": self.wait_until_instantiated,
             # cannot call it 'close' on the rpc side for naming conflict
             "get_logs": self.get_logs,
             "terminate": self.close,
@@ -371,6 +372,14 @@ class Nanny(ServerNode):
         deadline = time() + timeout
         await self.process.kill(timeout=0.8 * (deadline - time()))
 
+    async def wait_until_instantiated(self) -> Status:
+        if not self._should_restart():
+            return self.status
+        while self.process is None:
+            await asyncio.sleep(0.1)
+        await self.process.running.wait()  # type: ignore[unreachable]
+        return self.status
+
     async def instantiate(self) -> Status:
         """Start a local worker process
 
@@ -472,7 +481,7 @@ class Nanny(ServerNode):
         async def _():
             if self.process is not None:
                 await self.kill()
-                await self.instantiate()
+                await self.wait_until_instantiated()
 
         try:
             await asyncio.wait_for(_(), timeout)
@@ -496,6 +505,13 @@ class Nanny(ServerNode):
         except AsyncTaskGroupClosedError:  # Async task group has already been closed, so the nanny is already clos(ed|ing).
             pass
 
+    def _should_restart(self) -> bool:
+        return self.status not in (
+            Status.closing,
+            Status.closed,
+            Status.closing_gracefully,
+        )
+
     @log_errors
     async def _on_exit(self, exitcode):
         if self.status not in (
@@ -513,11 +529,7 @@ class Nanny(ServerNode):
                     return
 
         try:
-            if self.status not in (
-                Status.closing,
-                Status.closed,
-                Status.closing_gracefully,
-            ):
+            if self._should_restart():
                 logger.warning("Restarting worker")
                 await self.instantiate()
             elif self.status == Status.closing_gracefully:
