@@ -618,6 +618,8 @@ class WorkerProcess:
         self.Worker = worker
         self.env = env
         self.config = config
+        self.running = asyncio.Event()
+        self.stopped = asyncio.Event()
 
         # Initialized when worker is ready
         self.worker_dir = None
@@ -633,6 +635,8 @@ class WorkerProcess:
         if self.status == Status.starting:
             await self.running.wait()
             return self.status
+
+        self.stopped.clear()
 
         self.init_result_q = init_q = get_mp_context().Queue()
         self.child_stop_q = get_mp_context().Queue()
@@ -654,8 +658,6 @@ class WorkerProcess:
         )
         self.process.daemon = dask.config.get("distributed.worker.daemon", default=True)
         self.process.set_exit_callback(self._on_exit)
-        self.running = asyncio.Event()
-        self.stopped = asyncio.Event()
         self.status = Status.starting
 
         try:
@@ -738,9 +740,12 @@ class WorkerProcess:
         if self.status == Status.stopped:
             return
         if self.status == Status.stopping:
+            assert self.stopped is not None
             await self.stopped.wait()
             return
         assert self.status in (Status.starting, Status.running)
+        assert self.running is not None
+        self.running.clear()
         self.status = Status.stopping
         logger.info("Nanny asking worker to close")
 
