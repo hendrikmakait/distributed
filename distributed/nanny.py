@@ -15,7 +15,7 @@ from contextlib import suppress
 from inspect import isawaitable
 from queue import Empty
 from time import sleep as sync_sleep
-from typing import TYPE_CHECKING, ClassVar, Literal
+from typing import TYPE_CHECKING, ClassVar
 
 from tornado import gen
 from tornado.ioloop import IOLoop
@@ -374,13 +374,11 @@ class Nanny(ServerNode):
         deadline = time() + timeout
         await self.process.kill(timeout=0.8 * (deadline - time()))
 
-    async def wait_until_instantiated(
-        self, timeout: int = 30
-    ) -> Literal["OK", "already-closed"]:
+    async def wait_until_instantiated(self, timeout: int = 30) -> Status:
         """Check if worker process will be instantiated and wait for that to happen.
 
-        If the worker process will be instantiated, this method waits until then and returns ``OK``.
-        If the nanny has already been closed and the process will not be instantiated again, returns ``already-closed`` without waiting.
+        If the worker process will be instantiated, this method waits until then and returns its status.
+        If the nanny has already been closed and the process will not be instantiated again, immediately returns the process's status.
 
         Parameters
         ----------
@@ -391,11 +389,11 @@ class Nanny(ServerNode):
 
         async def _():
             if not self._should_restart():
-                return "already-closed"
+                return self.process.status
             await self.process_initialized.wait()
             assert self.process is not None
-            await self.process.running.wait()
-            return "OK"
+            await self.process.started.wait()
+            return self.process.status
 
         try:
             return await asyncio.wait_for(_(), timeout=timeout)
@@ -504,17 +502,20 @@ class Nanny(ServerNode):
         async def _():
             if self.process is not None:
                 await self.kill()
-                await self.wait_until_instantiated()
+                return await self.wait_until_instantiated()
 
         try:
-            await asyncio.wait_for(_(), timeout)
+            status = await asyncio.wait_for(_(), timeout)
         except TimeoutError:
             logger.error(
                 f"Restart timed out after {timeout}s; returning before finished"
             )
             return "timed out"
         else:
-            return "OK"
+            if status is Status.running:
+                return "OK"
+            else:
+                return "failed"
 
     def is_alive(self):
         return self.process is not None and self.process.is_alive()
