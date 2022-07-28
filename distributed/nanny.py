@@ -654,7 +654,7 @@ class WorkerProcess:
         self.Worker = worker
         self.env = env
         self.config = config
-        self.running = asyncio.Event()
+        self.started = asyncio.Event()
         self.stopped = asyncio.Event()
 
         # Initialized when worker is ready
@@ -669,10 +669,11 @@ class WorkerProcess:
         if self.status == Status.running:
             return self.status
         if self.status == Status.starting:
-            await self.running.wait()
+            await self.started.wait()
             return self.status
 
-        self.stopped.clear()
+        self.status = Status.starting
+        self.started.clear()
 
         self.init_result_q = init_q = get_mp_context().Queue()
         self.child_stop_q = get_mp_context().Queue()
@@ -694,7 +695,6 @@ class WorkerProcess:
         )
         self.process.daemon = dask.config.get("distributed.worker.daemon", default=True)
         self.process.set_exit_callback(self._on_exit)
-        self.status = Status.starting
 
         try:
             await self.process.start()
@@ -702,13 +702,15 @@ class WorkerProcess:
             logger.exception("Nanny failed to start process", exc_info=True)
             self.process.terminate()
             self.status = Status.failed
+            self.started.set()
             return self.status
         try:
             msg = await self._wait_until_connected(uid)
         except Exception:
             logger.exception("Failed to connect to process")
-            self.status = Status.failed
             self.process.terminate()
+            self.status = Status.failed
+            self.started.set()
             raise
         if not msg:
             return self.status
@@ -716,7 +718,7 @@ class WorkerProcess:
         self.worker_dir = msg["dir"]
         assert self.worker_address
         self.status = Status.running
-        self.running.set()
+        self.started.set()
 
         init_q.close()
 
@@ -780,7 +782,7 @@ class WorkerProcess:
             return
         assert self.status in (Status.starting, Status.running)
         self.status = Status.stopping
-        self.running.clear()
+        self.stopped.clear()
         logger.info("Nanny asking worker to close")
 
         process = self.process
