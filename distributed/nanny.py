@@ -776,11 +776,9 @@ class WorkerProcess:
         if self.status == Status.stopped:
             return
         if self.status == Status.stopping:
-            assert self.stopped is not None
             await self.stopped.wait()
             return
         assert self.status in (Status.starting, Status.running)
-        assert self.running is not None
         self.status = Status.stopping
         self.running.clear()
         logger.info("Nanny asking worker to close")
