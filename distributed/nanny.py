@@ -14,7 +14,6 @@ from collections.abc import Collection
 from contextlib import suppress
 from inspect import isawaitable
 from queue import Empty
-from time import sleep as sync_sleep
 from typing import TYPE_CHECKING, ClassVar
 
 from toolz import merge
@@ -653,7 +652,7 @@ class WorkerProcess:
             await self.running.wait()
             return self.status
         mp_ctx = get_mp_context()
-        self.init_result_q = init_q = mp_ctx.Queue()
+        self.init_result_q = mp_ctx.Queue()
         self.child_stop_q = mp_ctx.Queue()
         uid = uuid.uuid4().hex
 
@@ -695,8 +694,6 @@ class WorkerProcess:
             await self.process.terminate()
             self.status = Status.failed
             raise
-        finally:
-            init_q.close()
         if not msg:
             return self.status
         self.worker_address = msg["address"]
@@ -774,10 +771,9 @@ class WorkerProcess:
 
         process = self.process
         assert process
-        queue = self.child_stop_q
-        assert queue
         wait_timeout = timeout * 0.8
-        queue.put(
+        assert self.child_stop_q
+        self.child_stop_q.put(
             {
                 "op": "stop",
                 "timeout": wait_timeout,
@@ -890,14 +886,6 @@ class WorkerProcess:
                 except Exception as e:
                     logger.exception("Failed to start worker")
                     init_result_q.put({"uid": uid, "exception": e})
-                    # If we hit an exception here we need to wait for a least
-                    # one interval for the outside to pick up this message.
-                    # Otherwise we arrive in a race condition where the process
-                    # cleanup wipes the queue before the exception can be
-                    # properly handled. See also
-                    # WorkerProcess._wait_until_connected (the 2 is for good
-                    # measure)
-                    sync_sleep(cls._init_msg_interval * 2)
                 else:
                     try:
                         assert worker.address
@@ -917,12 +905,6 @@ class WorkerProcess:
         except Exception as e:
             logger.exception("Failed to initialize Worker")
             init_result_q.put({"uid": uid, "exception": e})
-            # If we hit an exception here we need to wait for a least one
-            # interval for the outside to pick up this message. Otherwise we
-            # arrive in a race condition where the process cleanup wipes the
-            # queue before the exception can be properly handled. See also
-            # WorkerProcess._wait_until_connected (the 2 is for good measure)
-            sync_sleep(cls._init_msg_interval * 2)
         else:
             try:
                 loop.run_sync(run)
@@ -935,10 +917,12 @@ class WorkerProcess:
                 loop.run_sync(do_stop)
             finally:
                 child_stop_q.put({"op": "stop"})
-                thread.join()
                 child_stop_q.close()
                 child_stop_q.join_thread()
-                thread.join(timeout=2)
+                thread.join()
+        finally:
+            init_result_q.close()
+            init_result_q.join_thread()
 
 
 def _get_env_variables(config_key: str) -> dict[str, str]:
