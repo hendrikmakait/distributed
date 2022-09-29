@@ -776,9 +776,14 @@ def test_balance(inp, expected, recompute_saturation):
     async def test_balance_(*args, **kwargs):
         await assert_balanced(inp, expected, recompute_saturation, *args, **kwargs)
 
-    config = {
-        "distributed.scheduler.default-task-durations": {str(i): 1 for i in range(10)}
-    }
+    config = merge(
+        NO_AMM,
+        {
+            "distributed.scheduler.default-task-durations": {
+                str(i): 1 for i in range(10)
+            }
+        },
+    )
     gen_cluster(client=True, nthreads=[("", 1)] * len(inp), config=config)(
         test_balance_
     )()
@@ -1640,6 +1645,7 @@ def _run_dependency_balance_test(
             client=True,
             nthreads=[("", 1)] * len(task_placement),
             config=merge(
+                NO_AMM,
                 config or {},
                 {
                     "distributed.scheduler.unknown-task-duration": "1s",
