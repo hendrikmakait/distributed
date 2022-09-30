@@ -1952,7 +1952,7 @@ class SchedulerState:
 
             if ws := self.decide_worker_non_rootish(ts):
                 self.unrunnable.discard(ts)
-                worker_msgs = _add_to_processing(self, ts, ws)
+                worker_msgs = self._add_to_processing(ts, ws)
             # If no worker, task just stays in `no-worker`
 
             return recommendations, client_msgs, worker_msgs
@@ -2208,7 +2208,7 @@ class SchedulerState:
                 if not (ws := self.decide_worker_non_rootish(ts)):
                     return {ts.key: "no-worker"}, {}, {}
 
-            worker_msgs = _add_to_processing(self, ts, ws)
+            worker_msgs = self._add_to_processing(ts, ws)
             return {}, {}, worker_msgs
         except Exception as e:
             logger.exception(e)
@@ -2346,7 +2346,7 @@ class SchedulerState:
             # NOTE: recommendations for queued tasks are added first, so they'll be popped last,
             # allowing higher-priority downstream tasks to be transitioned first.
             # FIXME: this would be incorrect if queued tasks are user-annotated as higher priority.
-            _exit_processing_common(self, ts, recommendations)
+            self._exit_processing_common(ts, recommendations)
 
             _add_to_memory(
                 self, ts, ws, recommendations, client_msgs, type=type, typename=typename
@@ -2577,7 +2577,7 @@ class SchedulerState:
                 assert not ts.waiting_on
                 assert ts.state == "processing"
 
-            ws = _exit_processing_common(self, ts, recommendations)
+            ws = self._exit_processing_common(ts, recommendations)
             if ws:
                 worker_msgs[ws.address] = [
                     {
@@ -2654,7 +2654,7 @@ class SchedulerState:
                 ws = ts.processing_on
                 ws.actors.remove(ts)
 
-            _exit_processing_common(self, ts, recommendations)
+            self._exit_processing_common(ts, recommendations)
 
             ts.erred_on.add(worker)
             if exception is not None:
@@ -2762,7 +2762,7 @@ class SchedulerState:
 
             if self.validate:
                 assert not self.idle, (ts, self.idle)
-                _validate_ready(self, ts)
+                self._validate_ready(ts)
 
             ts.state = "queued"
             self.queued.add(ts)
@@ -2784,7 +2784,7 @@ class SchedulerState:
             worker_msgs: dict = {}
 
             if self.validate:
-                _validate_ready(self, ts)
+                self._validate_ready(ts)
 
             ts.state = "no-worker"
             self.unrunnable.add(ts)
@@ -2834,7 +2834,7 @@ class SchedulerState:
 
             if ws := self.decide_worker_rootish_queuing_enabled():
                 self.queued.discard(ts)
-                worker_msgs = _add_to_processing(self, ts, ws)
+                worker_msgs = self._add_to_processing(ts, ws)
             # If no worker, task just stays `queued`
 
             return recommendations, client_msgs, worker_msgs
@@ -3250,6 +3250,75 @@ class SchedulerState:
         maybe_runnable.sort(key=operator.attrgetter("priority"), reverse=True)
         # Note not all will necessarily be run; transition->processing will decide
         return {ts.key: "processing" for ts in maybe_runnable}
+
+    def _validate_ready(self, ts: TaskState) -> None:
+        """Validation for ready states (processing, queued, no-worker)"""
+        assert not ts.waiting_on
+        assert not ts.who_has
+        assert not ts.exception_blame
+        assert not ts.processing_on
+        assert not ts.has_lost_dependencies
+        assert ts not in self.unrunnable
+        assert ts not in self.queued
+        assert all(dts.who_has for dts in ts.dependencies)
+
+    def _add_to_processing(self, ts: TaskState, ws: WorkerState) -> dict[str, list]:
+        """Set a task as processing on a worker and return the worker messages to send."""
+        if self.validate:
+            self._validate_ready(ts)
+            assert ws in self.running, self.running
+            assert (o := self.workers.get(ws.address)) is ws, (ws, o)
+
+        ws.add_to_processing(ts)
+        ts.processing_on = ws
+        ts.state = "processing"
+        self.acquire_resources(ts, ws)
+        self.check_idle_saturated(ws)
+        self.n_tasks += 1
+
+        if ts.actor:
+            ws.actors.add(ts)
+
+        return {ws.address: [_task_to_msg(self, ts)]}
+
+    def _exit_processing_common(
+        self, ts: TaskState, recommendations: Recs
+    ) -> WorkerState | None:
+        """Remove *ts* from the set of processing tasks.
+
+        Returns
+        -------
+        Worker state of the worker that processed *ts* if the worker is current,
+        None if the worker is stale.
+
+        See also
+        --------
+        Scheduler._set_duration_estimate
+        """
+        ws = ts.processing_on
+        assert ws
+        ts.processing_on = None
+
+        ws.remove_from_processing(ts)
+        if self.workers.get(ws.address) is not ws:  # may have been removed
+            return None
+
+        self.check_idle_saturated(ws)
+        self.release_resources(ts, ws)
+
+        # If a slot has opened up for a queued task, schedule it.
+        if self.queued and not _worker_full(ws, self.WORKER_SATURATION):
+            qts = self.queued.peek()
+            if self.validate:
+                assert qts.state == "queued", qts.state
+                assert qts.key not in recommendations, recommendations[qts.key]
+
+            # NOTE: we don't need to schedule more than one task at once here. Since this is
+            # called each time 1 task completes, multiple tasks must complete for multiple
+            # slots to open up.
+            recommendations[qts.key] = "processing"
+
+        return ws
 
 
 class Scheduler(SchedulerState, ServerNode):
@@ -7755,80 +7824,6 @@ class Scheduler(SchedulerState, ServerNode):
                 "stimulus_id": stimulus_id,
             }
         )
-
-
-def _validate_ready(state: SchedulerState, ts: TaskState) -> None:
-    """Validation for ready states (processing, queued, no-worker)"""
-    assert not ts.waiting_on
-    assert not ts.who_has
-    assert not ts.exception_blame
-    assert not ts.processing_on
-    assert not ts.has_lost_dependencies
-    assert ts not in state.unrunnable
-    assert ts not in state.queued
-    assert all(dts.who_has for dts in ts.dependencies)
-
-
-def _add_to_processing(
-    state: SchedulerState, ts: TaskState, ws: WorkerState
-) -> dict[str, list]:
-    """Set a task as processing on a worker and return the worker messages to send."""
-    if state.validate:
-        _validate_ready(state, ts)
-        assert ws in state.running, state.running
-        assert (o := state.workers.get(ws.address)) is ws, (ws, o)
-
-    ws.add_to_processing(ts)
-    ts.processing_on = ws
-    ts.state = "processing"
-    state.acquire_resources(ts, ws)
-    state.check_idle_saturated(ws)
-    state.n_tasks += 1
-
-    if ts.actor:
-        ws.actors.add(ts)
-
-    return {ws.address: [_task_to_msg(state, ts)]}
-
-
-def _exit_processing_common(
-    state: SchedulerState, ts: TaskState, recommendations: Recs
-) -> WorkerState | None:
-    """Remove *ts* from the set of processing tasks.
-
-    Returns
-    -------
-    Worker state of the worker that processed *ts* if the worker is current,
-    None if the worker is stale.
-
-    See also
-    --------
-    Scheduler._set_duration_estimate
-    """
-    ws = ts.processing_on
-    assert ws
-    ts.processing_on = None
-
-    ws.remove_from_processing(ts)
-    if state.workers.get(ws.address) is not ws:  # may have been removed
-        return None
-
-    state.check_idle_saturated(ws)
-    state.release_resources(ts, ws)
-
-    # If a slot has opened up for a queued task, schedule it.
-    if state.queued and not _worker_full(ws, state.WORKER_SATURATION):
-        qts = state.queued.peek()
-        if state.validate:
-            assert qts.state == "queued", qts.state
-            assert qts.key not in recommendations, recommendations[qts.key]
-
-        # NOTE: we don't need to schedule more than one task at once here. Since this is
-        # called each time 1 task completes, multiple tasks must complete for multiple
-        # slots to open up.
-        recommendations[qts.key] = "processing"
-
-    return ws
 
 
 def _add_to_memory(
