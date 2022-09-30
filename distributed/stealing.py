@@ -282,9 +282,9 @@ class WorkStealing(SchedulerPlugin):
                 "Request move %s, %s: %2f -> %s: %2f",
                 key,
                 victim,
-                victim.occupancy,
+                victim.occupancy(self.scheduler),
                 thief,
-                thief.occupancy,
+                thief.occupancy(self.scheduler),
             )
 
             # TODO: occupancy no longer concats linearily so we can't easily
@@ -368,8 +368,8 @@ class WorkStealing(SchedulerPlugin):
             elif state in _WORKER_STATE_CONFIRM:
                 self.remove_key_from_stealable(ts)
                 ts.processing_on = thief
-                victim.remove_from_processing(ts)
-                thief.add_to_processing(ts)
+                self.scheduler.remove_from_processing(ts, victim)
+                self.scheduler.add_to_processing(ts, thief)
                 self.put_key_in_stealable(ts)
 
                 self.scheduler.send_task_to_worker(thief.address, ts)
@@ -488,7 +488,7 @@ class WorkStealing(SchedulerPlugin):
                 s.digests["steal-duration"].add(stop - start)
 
     def _combined_occupancy(self, ws: WorkerState) -> float:
-        return ws.occupancy + self.in_flight_occupancy[ws]
+        return ws.occupancy(self.scheduler) + self.in_flight_occupancy[ws]
 
     def _combined_nprocessing(self, ws: WorkerState) -> int:
         return len(ws.processing) + self.in_flight_tasks[ws]

@@ -482,8 +482,6 @@ class WorkerState:
     # The unique server ID this WorkerState is referencing
     server_id: str
 
-    # Reference to scheduler task_groups
-    scheduler_ref: weakref.ref[SchedulerState] | None
     task_groups_count: defaultdict[str, int]
     _network_occ: float
     _occupancy_cache: float | None
@@ -512,7 +510,6 @@ class WorkerState:
         services: dict[str, int] | None = None,
         versions: dict[str, Any] | None = None,
         extra: dict[str, Any] | None = None,
-        scheduler: SchedulerState | None = None,
     ):
         self.server_id = server_id
         self.address = address
@@ -541,7 +538,6 @@ class WorkerState:
         self.resources = {}
         self.used_resources = {}
         self.extra = extra or {}
-        self.scheduler_ref = weakref.ref(scheduler) if scheduler else None
         self.task_groups_count = defaultdict(int)
         self.needs_what = {}
         self._network_occ = 0
@@ -582,7 +578,7 @@ class WorkerState:
             unmanaged_old=self._memory_unmanaged_old,
         )
 
-    def clean(self) -> WorkerState:
+    def clean(self, scheduler: SchedulerState) -> WorkerState:
         """Return a version of this object that is appropriate for serialization"""
         ws = WorkerState(
             address=self.address,
@@ -597,7 +593,7 @@ class WorkerState:
             extra=self.extra,
             server_id=self.server_id,
         )
-        ws._occupancy_cache = self.occupancy
+        ws._occupancy_cache = self.occupancy(scheduler)
 
         ws.executing = {
             ts.key: duration for ts, duration in self.executing.items()  # type: ignore
@@ -656,120 +652,14 @@ class WorkerState:
             members=True,
         )
 
-    @property
-    def scheduler(self):
-        assert self.scheduler_ref
-        s = self.scheduler_ref()
-        assert s
-        return s
-
-    def add_to_processing(self, ts: TaskState) -> None:
-        """Assign a task to this worker for compute."""
-        if self.scheduler.validate:
-            assert ts not in self.processing
-
-        tg = ts.group
-        self.task_groups_count[tg.name] += 1
-        self.scheduler.task_groups_count_global[tg.name] += 1
-        self.processing.add(ts)
-        for dts in ts.dependencies:
-            if self not in dts.who_has:
-                self._inc_needs_replica(dts)
-
-    def add_to_long_running(self, ts: TaskState) -> None:
-        if self.scheduler.validate:
-            assert ts in self.processing
-            assert ts not in self.long_running
-
-        self._remove_from_task_groups_count(ts)
-        # Cannot remove from processing since we're using this for things like
-        # idleness detection. Idle workers are typically targeted for
-        # downscaling but we should not downscale workers with long running
-        # tasks
-        self.long_running.add(ts)
-
-    def remove_from_processing(self, ts: TaskState) -> None:
-        """Remove a task from a workers processing"""
-        if self.scheduler.validate:
-            assert ts in self.processing
-
-        if ts in self.long_running:
-            self.long_running.discard(ts)
-        else:
-            self._remove_from_task_groups_count(ts)
-        self.processing.remove(ts)
-        for dts in ts.dependencies:
-            if dts in self.needs_what:
-                self._dec_needs_replica(dts)
-
-    def _remove_from_task_groups_count(self, ts: TaskState) -> None:
-        count = self.task_groups_count[ts.group.name] - 1
-        if count:
-            self.task_groups_count[ts.group.name] = count
-        else:
-            del self.task_groups_count[ts.group.name]
-
-        count = self.scheduler.task_groups_count_global[ts.group.name] - 1
-        if count:
-            self.scheduler.task_groups_count_global[ts.group.name] = count
-        else:
-            del self.scheduler.task_groups_count_global[ts.group.name]
-
-    def remove_replica(self, ts: TaskState) -> None:
-        """The worker no longer has a task in memory"""
-        if self.scheduler.validate:
-            assert self in ts.who_has
-            assert ts in self.has_what
-            assert ts not in self.needs_what
-
-        self.nbytes -= ts.get_nbytes()
-        del self._has_what[ts]
-        ts.who_has.remove(self)
-
-    def _inc_needs_replica(self, ts: TaskState) -> None:
-        """Assign a task fetch to this worker and update network occupancies"""
-        if self.scheduler.validate:
-            assert self not in ts.who_has
-            assert ts not in self.has_what
-        if ts not in self.needs_what:
-            self.needs_what[ts] = 1
-            nbytes = ts.get_nbytes()
-            self._network_occ += nbytes
-            self.scheduler._network_occ_global += nbytes
-        else:
-            self.needs_what[ts] += 1
-
-    def _dec_needs_replica(self, ts: TaskState) -> None:
-        if self.scheduler.validate:
-            assert ts in self.needs_what
-
-        self.needs_what[ts] -= 1
-        if self.needs_what[ts] == 0:
-            del self.needs_what[ts]
-            nbytes = ts.get_nbytes()
-            self._network_occ -= nbytes
-            self.scheduler._network_occ_global -= nbytes
-
-    def add_replica(self, ts: TaskState) -> None:
-        """The worker acquired a replica of task"""
-        if self.scheduler.validate:
-            assert self not in ts.who_has
-            assert ts not in self.has_what
-
-        nbytes = ts.get_nbytes()
-        if ts in self.needs_what:
-            del self.needs_what[ts]
-            self._network_occ -= nbytes
-            self.scheduler._network_occ_global -= nbytes
-        ts.who_has.add(self)
-        self.nbytes += nbytes
-        self._has_what[ts] = None
-
-    @property
-    def occupancy(self) -> float:
-        return self._occupancy_cache or self.scheduler._calc_occupancy(
-            self.task_groups_count, self._network_occ
-        )
+    def occupancy(self, scheduler: SchedulerState | None = None) -> float:
+        if scheduler is not None:
+            return scheduler._calc_occupancy(self.task_groups_count, self._network_occ)
+        if self._occupancy_cache is None:
+            raise AttributeError(
+                "Excepted self._occupancy_cache to be set or scheduler parameter to be provided; both are None."
+            )
+        return self._occupancy_cache
 
 
 @dataclasses.dataclass
@@ -1952,7 +1842,7 @@ class SchedulerState:
 
             if ws := self.decide_worker_non_rootish(ts):
                 self.unrunnable.discard(ts)
-                worker_msgs = self._add_to_processing(ts, ws)
+                worker_msgs = self._enter_processing_common(ts, ws)
             # If no worker, task just stays in `no-worker`
 
             return recommendations, client_msgs, worker_msgs
@@ -2164,7 +2054,7 @@ class SchedulerState:
             if n_workers < 20:  # smart but linear in small case
                 ws = min(wp_vals, key=operator.attrgetter("occupancy"))
                 assert ws
-                if ws.occupancy == 0:
+                if ws.occupancy(self) == 0:
                     # special case to use round-robin; linear search
                     # for next worker with zero occupancy (or just
                     # land back where we started).
@@ -2173,7 +2063,7 @@ class SchedulerState:
                     i: int
                     for i in range(n_workers):
                         wp_i = wp_vals[(i + start) % n_workers]
-                        if wp_i.occupancy == 0:
+                        if wp_i.occupancy(self) == 0:
                             ws = wp_i
                             break
             else:  # dumb but fast in large case
@@ -2208,7 +2098,7 @@ class SchedulerState:
                 if not (ws := self.decide_worker_non_rootish(ts)):
                     return {ts.key: "no-worker"}, {}, {}
 
-            worker_msgs = self._add_to_processing(ts, ws)
+            worker_msgs = self._enter_processing_common(ts, ws)
             return {}, {}, worker_msgs
         except Exception as e:
             logger.exception(e)
@@ -2834,7 +2724,7 @@ class SchedulerState:
 
             if ws := self.decide_worker_rootish_queuing_enabled():
                 self.queued.discard(ts)
-                worker_msgs = self._add_to_processing(ts, ws)
+                worker_msgs = self._enter_processing_common(ts, ws)
             # If no worker, task just stays `queued`
 
             return recommendations, client_msgs, worker_msgs
@@ -3019,7 +2909,7 @@ class SchedulerState:
         if self.total_nthreads == 0 or ws.status == Status.closed:
             return
         if occ < 0:
-            occ = ws.occupancy
+            occ = ws.occupancy(self)
 
         nc: int = ws.nthreads
         p: int = len(ws.processing)
@@ -3189,7 +3079,7 @@ class SchedulerState:
                 nbytes = dts.get_nbytes()
                 comm_bytes += nbytes
 
-        stack_time: float = ws.occupancy / ws.nthreads
+        stack_time: float = ws.occupancy(self) / ws.nthreads
         start_time: float = stack_time + comm_bytes / self.bandwidth
 
         if ts.actor:
@@ -3199,13 +3089,32 @@ class SchedulerState:
 
     def add_replica(self, ts: TaskState, ws: WorkerState):
         """Note that a worker holds a replica of a task with state='memory'"""
-        ws.add_replica(ts)
+        if self.validate:
+            assert ws not in ts.who_has
+            assert ts not in ws.has_what
+
+        nbytes = ts.get_nbytes()
+        if ts in ws.needs_what:
+            del ws.needs_what[ts]
+            ws._network_occ -= nbytes
+            self._network_occ_global -= nbytes
+        ts.who_has.add(ws)
+        ws.nbytes += nbytes
+        ws._has_what[ts] = None
+
         if len(ts.who_has) == 2:
             self.replicated_tasks.add(ts)
 
     def remove_replica(self, ts: TaskState, ws: WorkerState):
         """Note that a worker no longer holds a replica of a task"""
-        ws.remove_replica(ts)
+        if self.validate:
+            assert ws in ts.who_has
+            assert ts in ws.has_what
+            assert ts not in ws.needs_what
+
+        ws.nbytes -= ts.get_nbytes()
+        del ws._has_what[ts]
+        ts.who_has.remove(ws)
         if len(ts.who_has) == 1:
             self.replicated_tasks.remove(ts)
 
@@ -3262,24 +3171,99 @@ class SchedulerState:
         assert ts not in self.queued
         assert all(dts.who_has for dts in ts.dependencies)
 
-    def _add_to_processing(self, ts: TaskState, ws: WorkerState) -> dict[str, list]:
+    def _enter_processing_common(
+        self, ts: TaskState, ws: WorkerState
+    ) -> dict[str, list]:
         """Set a task as processing on a worker and return the worker messages to send."""
-        if self.validate:
-            self._validate_ready(ts)
-            assert ws in self.running, self.running
-            assert (o := self.workers.get(ws.address)) is ws, (ws, o)
-
-        ws.add_to_processing(ts)
+        self.add_to_processing(ts, ws)
         ts.processing_on = ws
         ts.state = "processing"
         self.acquire_resources(ts, ws)
         self.check_idle_saturated(ws)
         self.n_tasks += 1
-
         if ts.actor:
             ws.actors.add(ts)
 
         return {ws.address: [_task_to_msg(self, ts)]}
+
+    def add_to_processing(self, ts: TaskState, ws: WorkerState) -> None:
+        if self.validate:
+            self._validate_ready(ts)
+            assert ws in self.running, self.running
+            assert (o := self.workers.get(ws.address)) is ws, (ws, o)
+            assert ts not in ws.processing
+
+        tg = ts.group
+        ws.task_groups_count[tg.name] += 1
+        self.task_groups_count_global[tg.name] += 1
+        ws.processing.add(ts)
+        for dts in ts.dependencies:
+            if ws not in dts.who_has:
+                self._inc_needs_replica(dts, ws)
+
+    def add_to_long_running(self, ts: TaskState, ws: WorkerState) -> None:
+        if self.validate:
+            assert ts in ws.processing
+            assert ts not in ws.long_running
+
+        self._remove_from_task_groups_count(ts, ws)
+        # Cannot remove from processing since we're using this for things like
+        # idleness detection. Idle workers are typically targeted for
+        # downscaling but we should not downscale workers with long running
+        # tasks
+        ws.long_running.add(ts)
+
+    def remove_from_processing(self, ts: TaskState, ws: WorkerState) -> None:
+        """Remove a task from a workers processing"""
+        if self.validate:
+            assert ts in ws.processing
+
+        if ts in ws.long_running:
+            ws.long_running.discard(ts)
+        else:
+            self._remove_from_task_groups_count(ts, ws)
+        ws.processing.remove(ts)
+        for dts in ts.dependencies:
+            if dts in ws.needs_what:
+                self._dec_needs_replica(dts, ws)
+
+    def _remove_from_task_groups_count(self, ts: TaskState, ws: WorkerState) -> None:
+        count = ws.task_groups_count[ts.group.name] - 1
+        if count:
+            ws.task_groups_count[ts.group.name] = count
+        else:
+            del ws.task_groups_count[ts.group.name]
+
+        count = self.task_groups_count_global[ts.group.name] - 1
+        if count:
+            self.task_groups_count_global[ts.group.name] = count
+        else:
+            del self.task_groups_count_global[ts.group.name]
+
+    def _inc_needs_replica(self, ts: TaskState, ws: WorkerState) -> None:
+        """Assign a task fetch to this worker and update network occupancies"""
+        if self.validate:
+            assert ws not in ts.who_has
+            assert ts not in ws.has_what
+
+        if ts not in ws.needs_what:
+            ws.needs_what[ts] = 1
+            nbytes = ts.get_nbytes()
+            ws._network_occ += nbytes
+            self._network_occ_global += nbytes
+        else:
+            ws.needs_what[ts] += 1
+
+    def _dec_needs_replica(self, ts: TaskState, ws: WorkerState) -> None:
+        if self.validate:
+            assert ts in ws.needs_what
+
+        ws.needs_what[ts] -= 1
+        if ws.needs_what[ts] == 0:
+            del ws.needs_what[ts]
+            nbytes = ts.get_nbytes()
+            ws._network_occ -= nbytes
+            self._network_occ_global -= nbytes
 
     def _exit_processing_common(
         self, ts: TaskState, recommendations: Recs
@@ -3299,7 +3283,7 @@ class SchedulerState:
         assert ws
         ts.processing_on = None
 
-        ws.remove_from_processing(ts)
+        self.remove_from_processing(ts, ws)
         if self.workers.get(ws.address) is not ws:  # may have been removed
             return None
 
@@ -4200,7 +4184,6 @@ class Scheduler(SchedulerState, ServerNode):
             nanny=nanny,
             extra=extra,
             server_id=server_id,
-            scheduler=self,
         )
         if ws.status == Status.running:
             self.running.add(ws)
@@ -4817,7 +4800,7 @@ class Scheduler(SchedulerState, ServerNode):
                     e = pickle.dumps(
                         KilledWorker(
                             task=k,
-                            last_worker=ws.clean(),
+                            last_worker=ws.clean(self),
                             allowed_failures=self.allowed_failures,
                         ),
                         protocol=4,
@@ -5085,7 +5068,7 @@ class Scheduler(SchedulerState, ServerNode):
                 assert ws.address not in self.idle
             assert ws.long_running.issubset(ws.processing)
             if not ws.processing:
-                assert not ws.occupancy
+                assert not ws.occupancy(self)
                 if ws.status == Status.running:
                     assert ws.address in self.idle
             assert not ws.needs_what.keys() & ws.has_what
@@ -5342,7 +5325,7 @@ class Scheduler(SchedulerState, ServerNode):
             else:
                 ts.prefix.duration_average = (old_duration + compute_duration) / 2
 
-        ws.add_to_long_running(ts)
+        self.add_to_long_running(ts, ws)
         self.check_idle_saturated(ws)
 
     def handle_worker_status_change(
