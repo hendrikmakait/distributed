@@ -70,7 +70,7 @@ def set_tcp_timeout(comm):
 
     # Default (unsettable) value on Windows
     # https://msdn.microsoft.com/en-us/library/windows/desktop/dd877220(v=vs.85).aspx
-    nprobes = 10
+    nprobes = 1
     assert timeout >= nprobes + 1, "Timeout too low"
 
     idle = max(2, timeout // 4)
