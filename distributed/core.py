@@ -814,7 +814,7 @@ class Server:
 
     async def handle_stream(self, comm, extra=None):
         extra = extra or {}
-        logger.info("Starting established connection")
+        logger.info("Starting established connection to %s", comm.peer_address)
 
         closed = False
         try:
@@ -825,12 +825,16 @@ class Server:
 
                 if not comm.closed():
                     for msg in msgs:
-                        if msg == "OK":  # from close
+                        if msg == "OK":
                             break
                         op = msg.pop("op")
                         if op:
                             if op == "close-stream":
                                 closed = True
+                                logger.info(
+                                    "Received 'close-stream' from %s; closing.",
+                                    comm.peer_address,
+                                )
                                 break
                             handler = self.stream_handlers[op]
                             if iscoroutinefunction(handler):
@@ -843,16 +847,23 @@ class Server:
                         else:
                             logger.error("odd message %s", msg)
                     await asyncio.sleep(0)
-
+        except CommClosedError:
+            logger.info("Connection to %s already closed.", comm.peer_address)
         except OSError:
-            pass
+            logger.exception(
+                "Unable to communicate with %s; closing.",
+                comm.peer_address,
+            )
         except Exception as e:
-            logger.exception(e)
+            logger.exception(
+                "Unexpected exception while handling stream from %s; closing.",
+                comm.peer_address,
+            )
             if LOG_PDB:
                 import pdb
 
                 pdb.set_trace()
-            raise
+            raise e
         finally:
             await comm.close()
             assert comm.closed()
