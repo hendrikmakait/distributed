@@ -14,7 +14,7 @@ from collections.abc import Collection
 from contextlib import suppress
 from inspect import isawaitable
 from queue import Empty
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Literal
 
 from toolz import merge
 from tornado import gen
@@ -36,6 +36,7 @@ from distributed.core import (
     error_message,
 )
 from distributed.diagnostics.plugin import _get_plugin_name
+from distributed.diskutils import WorkSpace
 from distributed.metrics import time
 from distributed.node import ServerNode
 from distributed.process import AsyncProcess
@@ -88,20 +89,19 @@ class Nanny(ServerNode):
             2. Existing environment variables
             3. Dask configuration
 
-        Note
-        ----
-        Some environment variables, like ``OMP_NUM_THREADS``, must be set before
-        importing numpy to have effect. Others, like ``MALLOC_TRIM_THRESHOLD_`` (see
-        :ref:`memtrim`), must be set before starting the Linux process. Such variables
-        would be ineffective if set here or in ``distributed.nanny.environ``; they
-        must be set in ``distributed.nanny.pre-spawn-environ`` so that they are set
-        before spawning the subprocess, even if this means poisoning the
-        process running the Nanny.
+        .. note::
+           Some environment variables, like ``OMP_NUM_THREADS``, must be set before
+           importing numpy to have effect. Others, like ``MALLOC_TRIM_THRESHOLD_`` (see
+           :ref:`memtrim`), must be set before starting the Linux process. Such
+           variables would be ineffective if set here or in
+           ``distributed.nanny.environ``; they must be set in
+           ``distributed.nanny.pre-spawn-environ`` so that they are set before spawning
+           the subprocess, even if this means poisoning the process running the Nanny.
 
-        For the same reason, be warned that changing
-        ``distributed.worker.multiprocessing-method`` from ``spawn`` to ``fork`` or
-        ``forkserver`` may inhibit some environment variables; if you do, you should
-        set the variables yourself in the shell before you start ``dask-worker``.
+           For the same reason, be warned that changing
+           ``distributed.worker.multiprocessing-method`` from ``spawn`` to ``fork`` or
+           ``forkserver`` may inhibit some environment variables; if you do, you should
+           set the variables yourself in the shell before you start ``dask-worker``.
 
     See Also
     --------
@@ -109,7 +109,7 @@ class Nanny(ServerNode):
     """
 
     _instances: ClassVar[weakref.WeakSet[Nanny]] = weakref.WeakSet()
-    process = None
+    process: WorkerProcess | None
     memory_manager: NannyMemoryManager
 
     env: dict[str, str]
@@ -161,6 +161,7 @@ class Nanny(ServerNode):
                 stacklevel=2,
             )
 
+        self.process = None
         self._setup_logging(logger)
         self.loop = self.io_loop = IOLoop.current()
 
@@ -179,9 +180,9 @@ class Nanny(ServerNode):
         else:
             self._original_local_dir = local_directory
 
-        self.local_directory = local_directory
-        if not os.path.exists(self.local_directory):
-            os.makedirs(self.local_directory, exist_ok=True)
+        # Create directory if it doesn't exist and test for write access.
+        # In case of PermissionError, change the name.
+        self.local_directory = WorkSpace(local_directory).base_dir
 
         self.preload = preload
         if self.preload is None:
@@ -230,7 +231,7 @@ class Nanny(ServerNode):
             {k: str(v) for k, v in env.items()} if env else {},
         )
 
-        self.config = config or dask.config.config
+        self.config = merge(dask.config.config, config or {})
         worker_kwargs.update(
             {
                 "port": worker_port,
@@ -255,8 +256,8 @@ class Nanny(ServerNode):
             "instantiate": self.instantiate,
             "kill": self.kill,
             "restart": self.restart,
-            # cannot call it 'close' on the rpc side for naming conflict
             "get_logs": self.get_logs,
+            # cannot call it 'close' on the rpc side for naming conflict
             "terminate": self.close,
             "close_gracefully": self.close_gracefully,
             "run": self.run,
@@ -363,7 +364,7 @@ class Nanny(ServerNode):
         response = await self.instantiate()
 
         if response != Status.running:
-            await self.close()
+            await self.close(reason="nanny-start-failed")
             return
 
         assert self.worker_address
@@ -372,7 +373,7 @@ class Nanny(ServerNode):
 
         return self
 
-    async def kill(self, timeout=2):
+    async def kill(self, timeout: float = 2, reason: str = "nanny-kill") -> None:
         """Kill the local worker process
 
         Blocks until both the process is down and the scheduler is properly
@@ -382,7 +383,7 @@ class Nanny(ServerNode):
             return
 
         deadline = time() + timeout
-        await self.process.kill(timeout=0.8 * (deadline - time()))
+        await self.process.kill(reason=reason, timeout=0.8 * (deadline - time()))
 
     async def instantiate(self) -> Status:
         """Start a local worker process
@@ -429,7 +430,9 @@ class Nanny(ServerNode):
                     self,
                     self.scheduler_addr,
                 )
-                await self.close(timeout=self.death_timeout)
+                await self.close(
+                    timeout=self.death_timeout, reason="nanny-instantiate-timeout"
+                )
                 raise
 
         else:
@@ -437,7 +440,7 @@ class Nanny(ServerNode):
                 result = await self.process.start()
             except Exception:
                 logger.error("Failed to start process", exc_info=True)
-                await self.close()
+                await self.close(reason="nanny-instantiate-failed")
                 raise
         return result
 
@@ -463,7 +466,7 @@ class Nanny(ServerNode):
                 msg = error_message(e)
                 return msg
         if getattr(plugin, "restart", False):
-            await self.restart()
+            await self.restart(reason=f"nanny-plugin-{name}-restart")
 
         return {"status": "OK"}
 
@@ -482,10 +485,12 @@ class Nanny(ServerNode):
 
         return {"status": "OK"}
 
-    async def restart(self, timeout=30):
+    async def restart(
+        self, timeout: float = 30, reason: str = "nanny-restart"
+    ) -> Literal["OK", "timed out"]:
         async def _():
             if self.process is not None:
-                await self.kill()
+                await self.kill(reason=reason)
                 await self.instantiate()
 
         try:
@@ -524,7 +529,7 @@ class Nanny(ServerNode):
             except OSError:
                 logger.exception("Failed to unregister")
                 if not self.reconnect:
-                    await self.close()
+                    await self.close(reason="nanny-unregister-failed")
                     return
 
         try:
@@ -537,7 +542,7 @@ class Nanny(ServerNode):
                 logger.warning("Restarting worker")
                 await self.instantiate()
             elif self.status == Status.closing_gracefully:
-                await self.close()
+                await self.close(reason="nanny-close-gracefully")
 
         except Exception:
             logger.error(
@@ -552,15 +557,20 @@ class Nanny(ServerNode):
         warnings.warn("Worker._close has moved to Worker.close", stacklevel=2)
         return self.close(*args, **kwargs)
 
-    def close_gracefully(self):
+    def close_gracefully(self, reason: str = "nanny-close-gracefully") -> None:
         """
         A signal that we shouldn't try to restart workers if they go away
 
         This is used as part of the cluster shutdown process.
         """
         self.status = Status.closing_gracefully
+        logger.info(
+            "Closing Nanny gracefully at %r. Reason: %s", self.address_safe, reason
+        )
 
-    async def close(self, timeout=5):
+    async def close(
+        self, timeout: float = 5, reason: str = "nanny-close"
+    ) -> Literal["OK"]:
         """
         Close the worker process, stop all comms.
         """
@@ -572,10 +582,7 @@ class Nanny(ServerNode):
             return "OK"
 
         self.status = Status.closing
-        logger.info(
-            "Closing Nanny at %r.",
-            self.address_safe,
-        )
+        logger.info("Closing Nanny at %r. Reason: %s", self.address_safe, reason)
 
         for preload in self.preloads:
             await preload.teardown()
@@ -590,7 +597,7 @@ class Nanny(ServerNode):
 
         self.stop()
         if self.process is not None:
-            await self.kill(timeout=timeout)
+            await self.kill(timeout=timeout, reason=reason)
         self.process = None
         await self.rpc.close()
         self.status = Status.closed
@@ -611,6 +618,7 @@ class WorkerProcess:
     running: asyncio.Event
     stopped: asyncio.Event
 
+    process: AsyncProcess | None
     env: dict[str, str]
     pre_spawn_env: dict[str, str]
 
@@ -635,7 +643,17 @@ class WorkerProcess:
         self.Worker = worker
         self.env = env
         self.pre_spawn_env = pre_spawn_env
-        self.config = config
+        self.config = config.copy()
+
+        # Ensure default clients don't propagate to subprocesses
+        try:
+            from distributed.client import default_client
+
+            default_client()
+            self.config.pop("scheduler", None)
+            self.config.pop("shuffle", None)
+        except ValueError:
+            pass
 
         # Initialized when worker is ready
         self.worker_dir = None
@@ -728,6 +746,7 @@ class WorkerProcess:
 
     def mark_stopped(self):
         if self.status != Status.stopped:
+            assert self.process is not None
             r = self.process.exitcode
             assert r is not None
             if r != 0:
@@ -748,7 +767,12 @@ class WorkerProcess:
             if self.on_exit is not None:
                 self.on_exit(r)
 
-    async def kill(self, timeout: float = 2, executor_wait: bool = True) -> None:
+    async def kill(
+        self,
+        timeout: float = 2,
+        executor_wait: bool = True,
+        reason: str = "workerprocess-kill",
+    ) -> None:
         """
         Ensure the worker process is stopped, waiting at most
         ``timeout * 0.8`` seconds before killing it abruptly.
@@ -767,7 +791,7 @@ class WorkerProcess:
             return
         assert self.status in (Status.starting, Status.running)
         self.status = Status.stopping
-        logger.info("Nanny asking worker to close")
+        logger.info("Nanny asking worker to close. Reason: %s", reason)
 
         process = self.process
         assert process
@@ -778,6 +802,7 @@ class WorkerProcess:
                 "op": "stop",
                 "timeout": wait_timeout,
                 "executor_wait": executor_wait,
+                "reason": reason,
             }
         )
 
@@ -832,6 +857,7 @@ class WorkerProcess:
     ):  # pragma: no cover
         try:
             os.environ.update(env)
+            dask.config.refresh()
             dask.config.set(config)
 
             from dask.multiprocessing import default_initializer
@@ -846,12 +872,15 @@ class WorkerProcess:
             loop.make_current()
             worker = Worker(**worker_kwargs)
 
-            async def do_stop(timeout=5, executor_wait=True):
+            async def do_stop(
+                timeout=5, executor_wait=True, reason="workerprocess-stop"
+            ):
                 try:
                     await worker.close(
                         nanny=False,
                         executor_wait=executor_wait,
                         timeout=timeout,
+                        reason=reason,
                     )
                 finally:
                     loop.stop()

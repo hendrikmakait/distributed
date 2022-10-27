@@ -7,6 +7,7 @@ import inspect
 import json
 import logging
 import os
+import pickle
 import re
 import sys
 import threading
@@ -48,13 +49,14 @@ try:
 except ImportError:
     single_key = first
 from tornado import gen
-from tornado.ioloop import IOLoop, PeriodicCallback
+from tornado.ioloop import IOLoop
 
 import distributed.utils
 from distributed import cluster_dump, preloading
 from distributed import versions as version_module
 from distributed.batched import BatchedSend
 from distributed.cfexecutor import ClientExecutor
+from distributed.compatibility import PeriodicCallback
 from distributed.core import (
     CommClosedError,
     ConnectionPool,
@@ -629,18 +631,55 @@ class AllExit(Exception):
 
 def _handle_print(event):
     _, msg = event
-    if isinstance(msg, dict) and "args" in msg and "kwargs" in msg:
-        print(*msg["args"], **msg["kwargs"])
-    else:
+    if not isinstance(msg, dict):
+        # someone must have manually logged a print event with a hand-crafted
+        # payload, rather than by calling worker.print(). In that case simply
+        # print the payload and hope it works.
         print(msg)
+        return
+
+    args = msg.get("args")
+    if not isinstance(args, tuple):
+        # worker.print() will always send us a tuple of args, even if it's an
+        # empty tuple.
+        raise TypeError(
+            f"_handle_print: client received non-tuple print args: {args!r}"
+        )
+
+    file = msg.get("file")
+    if file == 1:
+        file = sys.stdout
+    elif file == 2:
+        file = sys.stderr
+    elif file is not None:
+        raise TypeError(
+            f"_handle_print: client received unsupported file kwarg: {file!r}"
+        )
+
+    print(
+        *args, sep=msg.get("sep"), end=msg.get("end"), file=file, flush=msg.get("flush")
+    )
 
 
 def _handle_warn(event):
     _, msg = event
-    if isinstance(msg, dict) and "args" in msg and "kwargs" in msg:
-        warnings.warn(*msg["args"], **msg["kwargs"])
-    else:
+    if not isinstance(msg, dict):
+        # someone must have manually logged a warn event with a hand-crafted
+        # payload, rather than by calling worker.warn(). In that case simply
+        # warn the payload and hope it works.
         warnings.warn(msg)
+    else:
+        if "message" not in msg:
+            # TypeError makes sense here because it's analogous to calling a
+            # function without a required positional argument
+            raise TypeError(
+                "_handle_warn: client received a warn event missing the required "
+                '"message" argument.'
+            )
+        warnings.warn(
+            pickle.loads(msg["message"]),
+            category=pickle.loads(msg.get("category", None)),
+        )
 
 
 def _maybe_call_security_loader(address):
@@ -2370,6 +2409,11 @@ class Client(SyncMethodMixin):
         broadcast : bool (defaults to False)
             Whether to send each data element to all workers.
             By default we round-robin based on number of cores.
+
+            .. note::
+               Setting this flag to True is incompatible with the Active Memory
+               Manager's :ref:`ReduceReplicas` policy. If you wish to use it, you must
+               first disable the policy or disable the AMM entirely.
         direct : bool (defaults to automatically check)
             Whether or not to connect directly to the workers, or to ask
             the scheduler to serve as intermediary.  This can also be set when
@@ -3441,8 +3485,11 @@ class Client(SyncMethodMixin):
         """Upload local package to workers
 
         This sends a local file up to all worker nodes.  This file is placed
-        into a temporary directory on Python's system path so any .py,  .egg
-        or .zip  files will be importable.
+        into the working directory of the running worker, see config option
+        ``temporary-directory`` (defaults to :py:func:`tempfile.gettempdir`).
+
+        This directory will be added to the Python's system path so any .py,
+        .egg or .zip  files will be importable.
 
         Parameters
         ----------
@@ -3510,11 +3557,16 @@ class Client(SyncMethodMixin):
         """Set replication of futures within network
 
         Copy data onto many workers.  This helps to broadcast frequently
-        accessed data and it helps to improve resilience.
+        accessed data and can improve resilience.
 
         This performs a tree copy of the data throughout the network
         individually on each piece of data.  This operation blocks until
         complete.  It does not guarantee replication of data to future workers.
+
+        .. note::
+           This method is incompatible with the Active Memory Manager's
+           :ref:`ReduceReplicas` policy. If you wish to use it, you must first disable
+           the policy or disable the AMM entirely.
 
         Parameters
         ----------
@@ -4155,8 +4207,8 @@ class Client(SyncMethodMixin):
             single argument `event` which is a tuple `(timestamp, msg)` where
             timestamp refers to the clock on the scheduler.
 
-        Example
-        -------
+        Examples
+        --------
 
         >>> import logging
         >>> logger = logging.getLogger("myLogger")  # Log config not shown
@@ -4738,9 +4790,9 @@ def wait(fs, timeout=None, return_when=ALL_COMPLETED):
     Parameters
     ----------
     fs : List[Future]
-    timeout : number, optional
-        Time in seconds after which to raise a
-        ``dask.distributed.TimeoutError``
+    timeout : number, string, optional
+        Time after which to raise a ``dask.distributed.TimeoutError``.
+        Can be a string like ``"10 minutes"`` or a number of seconds to wait.
     return_when : str, optional
         One of `ALL_COMPLETED` or `FIRST_COMPLETED`
 
@@ -4748,6 +4800,8 @@ def wait(fs, timeout=None, return_when=ALL_COMPLETED):
     -------
     Named tuple of completed, not completed
     """
+    if timeout is not None and isinstance(timeout, (Number, str)):
+        timeout = parse_timedelta(timeout, default="s")
     client = default_client()
     result = client.sync(_wait, fs, timeout=timeout, return_when=return_when)
     return result
