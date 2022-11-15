@@ -91,6 +91,7 @@ async def test_concurrent(c, s, a, b):
     clean_scheduler(s)
 
 
+@pytest.mark.skip
 @gen_cluster(client=True)
 async def test_bad_disk(c, s, a, b):
 
@@ -121,7 +122,6 @@ async def test_bad_disk(c, s, a, b):
     # clean_scheduler(s)
 
 
-@pytest.mark.skip
 @pytest.mark.slow
 @gen_cluster(client=True)
 async def test_crashed_worker(c, s, a, b):
@@ -604,10 +604,10 @@ async def test_basic_lowlevel_shuffle(
 
         assert total_bytes_recvd_shuffle == total_bytes_sent
 
-        def _done():
-            return [s.done() for s in shuffles]
+        def _closed():
+            return [s.closed for s in shuffles]
 
-        assert sum(_done()) == max(0, n_workers - npartitions)
+        assert sum(_closed()) == max(0, n_workers - npartitions)
 
         all_parts = []
         for part, worker in worker_for_mapping.items():
@@ -617,7 +617,7 @@ async def test_basic_lowlevel_shuffle(
         all_parts = await asyncio.gather(*all_parts)
 
         df_after = pd.concat(all_parts)
-        assert all(_done())
+        assert all(_closed())
     finally:
         await asyncio.gather(*[s.close() for s in shuffles])
     assert len(df_after) == len(pd.concat(dfs))

@@ -142,7 +142,8 @@ class Shuffle:
         self.total_recvd = 0
         self.start_time = time.time()
         self._exception: Exception | None = None
-        self.done = False
+        self.closed = False
+        self._close_lock = asyncio.Lock()
 
     def __repr__(self) -> str:
         return f"<Shuffle id: {self.id} on {self.local_address}>"
@@ -155,7 +156,7 @@ class Shuffle:
         self.diagnostics[name] += stop - start
 
     async def barrier(self) -> None:
-        self.check_done()
+        self.check_closed()
         # FIXME: This should restrict communication to only workers
         # participating in this specific shuffle. This will not only reduce the
         # number of workers we need to contact but will also simplify error
@@ -173,10 +174,15 @@ class Shuffle:
         # TODO handle errors from workers and scheduler, and cancellation.
 
     async def _send(self, address: str, shards: list[bytes]) -> None:
-        return await self.rpc(address).shuffle_receive(
-            data=to_serialize(shards),
-            shuffle_id=self.id,
-        )
+        try:
+            return await self.rpc(address).shuffle_receive(
+                data=to_serialize(shards),
+                shuffle_id=self.id,
+            )
+        except Exception as e:
+            self._exception = e
+            await self.close()
+            raise
 
     async def _offload(self, func: Callable[..., T], *args: Any) -> T:
         with self.time("cpu"):
@@ -200,7 +206,7 @@ class Shuffle:
         await self._receive(data)
 
     async def _receive(self, data: list[bytes]) -> None:
-        self.check_done()
+        self.check_closed()
         try:
             self.total_recvd += sum(map(len, data))
             # TODO: Is it actually a good idea to dispatch multiple times instead of
@@ -229,14 +235,15 @@ class Shuffle:
         except Exception as e:
             if self._exception is None:
                 self._exception = e
-                self.done = True
+                await self.close()
+            raise self._exception
 
     async def _write_to_disk(self, data: dict[str, list[bytes]]) -> None:
-        self.check_done()
+        self.check_closed()
         await self._disk_buffer.write(data)
 
     async def add_partition(self, data: pd.DataFrame) -> None:
-        self.check_done()
+        self.check_closed()
         if self.transferred:
             raise RuntimeError(f"Cannot add more partitions to shuffle {self}")
 
@@ -256,7 +263,7 @@ class Shuffle:
         await self._comm_buffer.write(out)
 
     async def get_output_partition(self, i: int) -> pd.DataFrame:
-        self.check_done()
+        self.check_closed()
         assert self.transferred, "`get_output_partition` called before barrier task"
 
         assert self.worker_for[i] == self.local_address, (
@@ -278,35 +285,37 @@ class Shuffle:
             out = self.schema.empty_table().to_pandas()
         self.output_partitions_left -= 1
         if self.output_partitions_left == 0:
-            self.done = True
+            await self.close()
         return out
 
     async def inputs_done(self) -> None:
-        self.check_done()
+        self.check_closed()
         assert not self.transferred, "`inputs_done` called multiple times"
         self.transferred = True
-        if self.output_partitions_left == 0:
-            self.done = True
         await self._comm_buffer.flush()
+        if self.output_partitions_left == 0:
+            self.closed = True
+            await self.close()
 
     async def flush_receive(self) -> None:
-        self.check_done()
+        self.check_closed()
         await self._disk_buffer.flush()
 
-    def check_done(self) -> None:
-        if self.done:
+    def check_closed(self) -> None:
+        if self.closed:
             if self._exception:
                 raise self._exception
             raise ShuffleDoneError(f"Shuffle {self.id} is already done")
 
     async def close(self) -> None:
-        self.done = True
-        await self._comm_buffer.close()
-        await self._disk_buffer.close()
-        try:
-            self.executor.shutdown(cancel_futures=True)
-        except Exception:
-            self.executor.shutdown()
+        async with self._close_lock:
+            self.closed = True
+            await self._comm_buffer.close()
+            await self._disk_buffer.close()
+            try:
+                self.executor.shutdown(cancel_futures=True)
+            except Exception:
+                self.executor.shutdown()
 
 
 class ShuffleWorkerExtension:
@@ -360,7 +369,7 @@ class ShuffleWorkerExtension:
         with log_errors():
             shuffle = await self._get_shuffle(shuffle_id)
             await shuffle.inputs_done()
-            if shuffle.done:
+            if shuffle.closed:
                 # If the shuffle has no output partitions, remove it now;
                 # `get_output_partition` will never be called.
                 # This happens when there are fewer output partitions than workers.
@@ -527,7 +536,7 @@ class ShuffleWorkerExtension:
         shuffle = self.shuffles[shuffle_id]
         output = sync(self.worker.loop, shuffle.get_output_partition, output_partition)
         # key missing if another thread got to it first
-        if shuffle.done and shuffle_id in self.shuffles:
+        if shuffle.closed and shuffle_id in self.shuffles:
             shuffle = self.shuffles.pop(shuffle_id)
             sync(self.worker.loop, self._register_complete, shuffle)
         return output
