@@ -140,7 +140,7 @@ async def test_crashed_worker(c, s, a, b):
             [
                 ts
                 for ts in s.tasks.values()
-                if "shuffle_transfer" in ts.key and ts.state == "memory"
+                if "shuffle-transfer" in ts.key and ts.state == "memory"
             ]
         )
         < 3
@@ -647,7 +647,7 @@ async def test_error_offload(tmpdir, loop_in_thread):
     local_shuffle_pool = ShuffleTestPool()
 
     class ErrorOffload(Shuffle):
-        async def offload(self, func, *args):
+        async def _offload(self, func, *args):
             raise RuntimeError("Error during deserialization")
 
     sA = local_shuffle_pool.new_shuffle(

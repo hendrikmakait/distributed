@@ -40,6 +40,10 @@ T = TypeVar("T")
 logger = logging.getLogger(__name__)
 
 
+class ShuffleDoneError(RuntimeError):
+    pass
+
+
 class Shuffle:
     """State for a single active shuffle
 
@@ -127,7 +131,7 @@ class Shuffle:
         )
 
         self._comm_buffer = CommShardsBuffer(
-            send=self.send, memory_limiter=memory_limiter_comms
+            send=self._send, memory_limiter=memory_limiter_comms
         )
         # TODO: reduce number of connections to number of workers
         # MultiComm.max_connections = min(10, n_workers)
@@ -138,6 +142,7 @@ class Shuffle:
         self.total_recvd = 0
         self.start_time = time.time()
         self._exception: Exception | None = None
+        self.done = False
 
     def __repr__(self) -> str:
         return f"<Shuffle id: {self.id} on {self.local_address}>"
@@ -150,6 +155,7 @@ class Shuffle:
         self.diagnostics[name] += stop - start
 
     async def barrier(self) -> None:
+        self.check_done()
         # FIXME: This should restrict communication to only workers
         # participating in this specific shuffle. This will not only reduce the
         # number of workers we need to contact but will also simplify error
@@ -166,13 +172,13 @@ class Shuffle:
             )
         # TODO handle errors from workers and scheduler, and cancellation.
 
-    async def send(self, address: str, shards: list[bytes]) -> None:
+    async def _send(self, address: str, shards: list[bytes]) -> None:
         return await self.rpc(address).shuffle_receive(
             data=to_serialize(shards),
             shuffle_id=self.id,
         )
 
-    async def offload(self, func: Callable[..., T], *args: Any) -> T:
+    async def _offload(self, func: Callable[..., T], *args: Any) -> T:
         with self.time("cpu"):
             return await asyncio.get_running_loop().run_in_executor(
                 self.executor,
@@ -194,36 +200,43 @@ class Shuffle:
         await self._receive(data)
 
     async def _receive(self, data: list[bytes]) -> None:
-        if self._exception:
-            raise self._exception
-
+        self.check_done()
         try:
             self.total_recvd += sum(map(len, data))
             # TODO: Is it actually a good idea to dispatch multiple times instead of
             # only once?
             # An ugly way of turning these batches back into an arrow table
-            data = await self.offload(
+            data = await self._offload(
                 list_of_buffers_to_table,
                 data,
                 self.schema,
             )
 
-            groups = await self.offload(split_by_partition, data, self.column)
+            groups = await self._offload(split_by_partition, data, self.column)
 
             assert len(data) == sum(map(len, groups.values()))
             del data
 
-            groups = await self.offload(
+            groups = await self._offload(
                 lambda: {
                     k: [batch.serialize() for batch in v.to_batches()]
                     for k, v in groups.items()
                 }
             )
-            await self._disk_buffer.write(groups)
+            await self._write_to_disk(groups)
+        except ShuffleDoneError:
+            raise
         except Exception as e:
-            self._exception = e
+            if self._exception is None:
+                self._exception = e
+                self.done = True
+
+    async def _write_to_disk(self, data: dict[str, list[bytes]]) -> None:
+        self.check_done()
+        await self._disk_buffer.write(data)
 
     async def add_partition(self, data: pd.DataFrame) -> None:
+        self.check_done()
         if self.transferred:
             raise RuntimeError(f"Cannot add more partitions to shuffle {self}")
 
@@ -239,10 +252,11 @@ class Shuffle:
             }
             return out
 
-        out = await self.offload(_)
+        out = await self._offload(_)
         await self._comm_buffer.write(out)
 
     async def get_output_partition(self, i: int) -> pd.DataFrame:
+        self.check_done()
         assert self.transferred, "`get_output_partition` called before barrier task"
 
         assert self.worker_for[i] == self.local_address, (
@@ -263,22 +277,30 @@ class Shuffle:
         except KeyError:
             out = self.schema.empty_table().to_pandas()
         self.output_partitions_left -= 1
+        if self.output_partitions_left == 0:
+            self.done = True
         return out
 
     async def inputs_done(self) -> None:
+        self.check_done()
         assert not self.transferred, "`inputs_done` called multiple times"
         self.transferred = True
+        if self.output_partitions_left == 0:
+            self.done = True
         await self._comm_buffer.flush()
 
-    def done(self) -> bool:
-        return self.transferred and self.output_partitions_left == 0
-
     async def flush_receive(self) -> None:
-        if self._exception:
-            raise self._exception
+        self.check_done()
         await self._disk_buffer.flush()
 
+    def check_done(self) -> None:
+        if self.done:
+            if self._exception:
+                raise self._exception
+            raise ShuffleDoneError(f"Shuffle {self.id} is already done")
+
     async def close(self) -> None:
+        self.done = True
         await self._comm_buffer.close()
         await self._disk_buffer.close()
         try:
@@ -338,7 +360,7 @@ class ShuffleWorkerExtension:
         with log_errors():
             shuffle = await self._get_shuffle(shuffle_id)
             await shuffle.inputs_done()
-            if shuffle.done():
+            if shuffle.done:
                 # If the shuffle has no output partitions, remove it now;
                 # `get_output_partition` will never be called.
                 # This happens when there are fewer output partitions than workers.
@@ -505,7 +527,7 @@ class ShuffleWorkerExtension:
         shuffle = self.shuffles[shuffle_id]
         output = sync(self.worker.loop, shuffle.get_output_partition, output_partition)
         # key missing if another thread got to it first
-        if shuffle.done() and shuffle_id in self.shuffles:
+        if shuffle.done and shuffle_id in self.shuffles:
             shuffle = self.shuffles.pop(shuffle_id)
             sync(self.worker.loop, self._register_complete, shuffle)
         return output
