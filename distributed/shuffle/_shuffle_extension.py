@@ -15,6 +15,7 @@ import toolz
 from dask.utils import parse_bytes
 
 from distributed.core import PooledRPCCall
+from distributed.diagnostics.plugin import SchedulerPlugin
 from distributed.protocol import to_serialize
 from distributed.shuffle._arrow import (
     deserialize_schema,
@@ -143,7 +144,7 @@ class Shuffle:
         self.start_time = time.time()
         self._exception: Exception | None = None
         self.closed = False
-        self._close_lock = asyncio.Lock()
+        self.closed_event = asyncio.Event()
 
     def __repr__(self) -> str:
         return f"<Shuffle id: {self.id} on {self.local_address}>"
@@ -156,7 +157,7 @@ class Shuffle:
         self.diagnostics[name] += stop - start
 
     async def barrier(self) -> None:
-        self.check_closed()
+        # self.check_closed()
         # FIXME: This should restrict communication to only workers
         # participating in this specific shuffle. This will not only reduce the
         # number of workers we need to contact but will also simplify error
@@ -180,9 +181,10 @@ class Shuffle:
                 shuffle_id=self.id,
             )
         except Exception as e:
-            self._exception = e
-            await self.close()
-            raise
+            if not self.closed:
+                self._exception = e
+                await self.close()
+                raise self._exception
 
     async def _offload(self, func: Callable[..., T], *args: Any) -> T:
         with self.time("cpu"):
@@ -206,7 +208,7 @@ class Shuffle:
         await self._receive(data)
 
     async def _receive(self, data: list[bytes]) -> None:
-        self.check_closed()
+        # self.check_closed()
         try:
             self.total_recvd += sum(map(len, data))
             # TODO: Is it actually a good idea to dispatch multiple times instead of
@@ -243,7 +245,7 @@ class Shuffle:
         await self._disk_buffer.write(data)
 
     async def add_partition(self, data: pd.DataFrame) -> None:
-        self.check_closed()
+        # self.check_closed()
         if self.transferred:
             raise RuntimeError(f"Cannot add more partitions to shuffle {self}")
 
@@ -260,10 +262,14 @@ class Shuffle:
             return out
 
         out = await self._offload(_)
-        await self._comm_buffer.write(out)
+        await self._write_to_comm(out)
+
+    async def _write_to_comm(self, data: dict[str, list[bytes]]) -> None:
+        self.check_closed()
+        await self._comm_buffer.write(data)
 
     async def get_output_partition(self, i: int) -> pd.DataFrame:
-        self.check_closed()
+        # self.check_closed()
         assert self.transferred, "`get_output_partition` called before barrier task"
 
         assert self.worker_for[i] == self.local_address, (
@@ -278,6 +284,7 @@ class Shuffle:
         ), f"No outputs remaining, but requested output partition {i} on {self.local_address}."
         await self.flush_receive()
         try:
+            self.check_closed()
             df = self._disk_buffer.read(i)
             with self.time("cpu"):
                 out = df.to_pandas()
@@ -289,12 +296,11 @@ class Shuffle:
         return out
 
     async def inputs_done(self) -> None:
-        self.check_closed()
+        # self.check_closed()
         assert not self.transferred, "`inputs_done` called multiple times"
         self.transferred = True
         await self._comm_buffer.flush()
         if self.output_partitions_left == 0:
-            self.closed = True
             await self.close()
 
     async def flush_receive(self) -> None:
@@ -308,14 +314,22 @@ class Shuffle:
             raise ShuffleDoneError(f"Shuffle {self.id} is already done")
 
     async def close(self) -> None:
-        async with self._close_lock:
-            self.closed = True
-            await self._comm_buffer.close()
-            await self._disk_buffer.close()
-            try:
-                self.executor.shutdown(cancel_futures=True)
-            except Exception:
-                self.executor.shutdown()
+        if self.closed:
+            await self.closed_event.wait()
+            return
+        self.closed = True
+        await self._comm_buffer.close()
+        await self._disk_buffer.close()
+        try:
+            self.executor.shutdown(cancel_futures=True)
+        except Exception:
+            self.executor.shutdown()
+        self.closed_event.set()
+
+    async def set_exception(self, message: str) -> None:
+        if not self.closed:
+            self._exception = RuntimeError(message)
+            await self.close()
 
 
 class ShuffleWorkerExtension:
@@ -334,6 +348,7 @@ class ShuffleWorkerExtension:
         # Attach to worker
         worker.handlers["shuffle_receive"] = self.shuffle_receive
         worker.handlers["shuffle_inputs_done"] = self.shuffle_inputs_done
+        worker.handlers["shuffle_set_exception"] = self.shuffle_set_exception
         worker.extensions["shuffle"] = self
 
         # Initialize
@@ -377,6 +392,10 @@ class ShuffleWorkerExtension:
                 del self.shuffles[shuffle_id]
                 logger.critical(f"Shuffle inputs done {shuffle}")
                 await self._register_complete(shuffle)
+
+    async def shuffle_set_exception(self, shuffle_id: ShuffleId, message: str) -> None:
+        shuffle = await self._get_shuffle(shuffle_id)
+        await shuffle.set_exception(message)
 
     def add_partition(
         self,
@@ -448,6 +467,9 @@ class ShuffleWorkerExtension:
                     npartitions=npartitions,
                     column=column,
                 )
+                if result["status"] == "ERROR":
+                    raise RuntimeError(f"Worker left the shuffle {result['worker']}")
+                assert result["status"] == "OK"
             except KeyError:
                 # Even the scheduler doesn't know about this shuffle
                 # Let's hand this back to the scheduler and let it figure
@@ -542,7 +564,7 @@ class ShuffleWorkerExtension:
         return output
 
 
-class ShuffleSchedulerExtension:
+class ShuffleSchedulerExtension(SchedulerPlugin):
     """
     Shuffle extension for the scheduler
 
@@ -561,6 +583,7 @@ class ShuffleSchedulerExtension:
     columns: dict[ShuffleId, str]
     output_workers: dict[ShuffleId, set[str]]
     completed_workers: dict[ShuffleId, set[str]]
+    erred_shuffles: dict[ShuffleId, str]
 
     def __init__(self, scheduler: Scheduler):
         self.scheduler = scheduler
@@ -576,6 +599,11 @@ class ShuffleSchedulerExtension:
         self.columns = {}
         self.output_workers = {}
         self.completed_workers = {}
+        self.erred_shuffles = {}
+        self.scheduler.add_plugin(self)
+
+    def shuffle_ids(self) -> set[ShuffleId]:
+        return set(self.worker_for)
 
     def heartbeat(self, ws: WorkerState, data: dict) -> None:
         for shuffle_id, d in data.items():
@@ -588,6 +616,9 @@ class ShuffleSchedulerExtension:
         column: str | None,
         npartitions: int | None,
     ) -> dict:
+        if id in self.erred_shuffles:
+            return {"status": "ERROR", "worker": self.erred_shuffles[id]}
+
         if id not in self.worker_for:
             assert schema is not None
             assert column is not None
@@ -615,11 +646,32 @@ class ShuffleSchedulerExtension:
             self.completed_workers[id] = set()
 
         return {
+            "status": "OK",
             "worker_for": self.worker_for[id],
             "column": self.columns[id],
             "schema": self.schemas[id],
             "output_workers": self.output_workers[id],
         }
+
+    async def remove_worker(self, scheduler: Scheduler, worker: str) -> None:
+        broadcasts = []
+        for shuffle_id, output_workers in self.output_workers.items():
+            if worker not in output_workers:
+                continue
+            self.erred_shuffles[shuffle_id] = worker
+            contact_workers = output_workers.copy()
+            contact_workers.discard(worker)
+            broadcasts.append(
+                scheduler.broadcast(
+                    msg={
+                        "op": "shuffle_set_exception",
+                        "message": f"Worker {worker} left during active shuffle {shuffle_id}",
+                        "shuffle_id": shuffle_id,
+                    },
+                    workers=list(contact_workers),
+                )
+            )
+        await asyncio.gather(*broadcasts, return_exceptions=True)
 
     def register_complete(self, id: ShuffleId, worker: str) -> None:
         """Learn from a worker that it has completed all reads of a shuffle"""
