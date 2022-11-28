@@ -145,7 +145,7 @@ class WorkerMetricCollector(PrometheusCollector):
         if self.server._max_tick_interval_observed != 0:
             yield GaugeMetricFamily(
                 self.build_name("max_tick_interval"),
-                "Maximum tick interval observed.",
+                "Maximum tick interval observed",
                 value=self.server._max_tick_interval_observed,
             )
         self.server._max_tick_interval_observed = 0

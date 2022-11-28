@@ -21,6 +21,7 @@ from distributed.utils_test import (
 async def test_prometheus(c, s, a):
     pytest.importorskip("prometheus_client")
 
+    # await c.run(lambda: None)
     active_metrics = await fetch_metrics_sample_names(
         a.http_server.port, prefix="dask_worker_"
     )
@@ -36,6 +37,7 @@ async def test_prometheus(c, s, a):
         "dask_worker_transfer_outgoing_bytes",
         "dask_worker_transfer_outgoing_count",
         "dask_worker_transfer_outgoing_count_total",
+        "dask_worker_max_tick_interval",
     }
 
     try:
