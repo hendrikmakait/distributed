@@ -132,7 +132,6 @@ from distributed.worker_state_machine import (
     UpdateDataEvent,
     WorkerState,
 )
-from distributed.worker_state_machine import logger as wsm_logger
 
 if TYPE_CHECKING:
     # FIXME import from typing (needs Python >=3.10)
@@ -572,7 +571,7 @@ class Worker(BaseWorker, ServerNode):
         profile_cycle_interval = parse_timedelta(profile_cycle_interval, default="ms")
         assert profile_cycle_interval
 
-        self._setup_logging(logger, wsm_logger)
+        self._setup_logging(logger)
 
         if not local_directory:
             local_directory = (
@@ -601,8 +600,9 @@ class Worker(BaseWorker, ServerNode):
             self, preload, preload_argv, file_dir=self.local_directory
         )
 
+        self.death_timeout = parse_timedelta(death_timeout)
         if scheduler_file:
-            cfg = json_load_robust(scheduler_file)
+            cfg = json_load_robust(scheduler_file, timeout=self.death_timeout)
             scheduler_addr = cfg["address"]
         elif scheduler_ip is None and dask.config.get("scheduler-address", None):
             scheduler_addr = dask.config.get("scheduler-address")
@@ -635,8 +635,6 @@ class Worker(BaseWorker, ServerNode):
         if resources is None:
             resources = dask.config.get("distributed.worker.resources")
             assert isinstance(resources, dict)
-
-        self.death_timeout = parse_timedelta(death_timeout)
 
         self.extensions = {}
         if silence_logs:
@@ -1489,7 +1487,7 @@ class Worker(BaseWorker, ServerNode):
         # nanny+worker, the nanny must be notified first. ==> Remove kwarg
         # nanny, see also Scheduler.retire_workers
         if self.status in (Status.closed, Status.closing, Status.failed):
-            logging.debug(
+            logger.debug(
                 "Attempted to close worker that is already %s. Reason: %s",
                 self.status,
                 reason,
@@ -1928,7 +1926,7 @@ class Worker(BaseWorker, ServerNode):
             super().handle_stimulus(*stims)
         except Exception as e:
             if hasattr(e, "to_event"):
-                topic, msg = e.to_event()  # type: ignore
+                topic, msg = e.to_event()
                 self.log_event(topic, msg)
             raise
 
@@ -2587,7 +2585,7 @@ class Worker(BaseWorker, ServerNode):
                 pdb.set_trace()
 
             if hasattr(e, "to_event"):
-                topic, msg = e.to_event()  # type: ignore
+                topic, msg = e.to_event()
                 self.log_event(topic, msg)
 
             raise

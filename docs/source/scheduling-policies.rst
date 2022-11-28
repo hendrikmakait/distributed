@@ -111,7 +111,7 @@ start running the soonest, using :meth:`Scheduler.worker_objective`. For each wo
 1.  We consider the estimated runtime of other tasks already queued on that worker.
     Then, we add how long it will take to transfer any dependencies to that worker that
     it doesn't already have, based on their size, in bytes, and the measured network
-    bandwith between workers. Note that this does *not* consider (de)serialization
+    bandwidth between workers. Note that this does *not* consider (de)serialization
     time, time to retrieve the data from disk if it was spilled, or potential differences
     between size in memory and serialized size. In practice, the
     queue-wait-time (known as *occupancy*) usually dominates, so data will usually be
@@ -264,8 +264,8 @@ Adjusting or disabling queuing
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 *It's rare to need to adjust queuing. The default value works well for almost all cases.
-Only advanced users wanting to tune performance in unusual cases might consider adjusing
-this parameter.*
+*Only advanced users wanting to tune performance in unusual cases might consider
+*adjusting this parameter.*
 
 Queuing behavior is controlled by the ``distributed.scheduler.worker-saturation`` config
 value. This is set via the :doc:`Dask configuration system <configuration>`. The config

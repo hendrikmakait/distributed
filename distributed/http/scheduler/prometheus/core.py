@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import prometheus_client
 import toolz
+from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
 
 from distributed.http.prometheus import PrometheusCollector
 from distributed.http.scheduler.prometheus.semaphore import SemaphoreMetricCollector
@@ -15,23 +17,22 @@ class SchedulerMetricCollector(PrometheusCollector):
         self.subsystem = "scheduler"
 
     def collect(self):
-        from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
 
         yield GaugeMetricFamily(
             self.build_name("clients"),
-            "Number of clients connected.",
+            "Number of clients connected",
             value=len([k for k in self.server.clients if k != "fire-and-forget"]),
         )
 
         yield GaugeMetricFamily(
             self.build_name("desired_workers"),
-            "Number of workers scheduler needs for task graph.",
+            "Number of workers scheduler needs for task graph",
             value=self.server.adaptive_target(),
         )
 
         worker_states = GaugeMetricFamily(
             self.build_name("workers"),
-            "Number of workers known by scheduler.",
+            "Number of workers known by scheduler",
             labels=["state"],
         )
         worker_states.add_metric(["connected"], len(self.server.workers))
@@ -41,7 +42,7 @@ class SchedulerMetricCollector(PrometheusCollector):
 
         tasks = GaugeMetricFamily(
             self.build_name("tasks"),
-            "Number of tasks known by scheduler.",
+            "Number of tasks known by scheduler",
             labels=["state"],
         )
 
@@ -63,8 +64,9 @@ class SchedulerMetricCollector(PrometheusCollector):
             self.build_name("tasks_forgotten"),
             (
                 "Total number of processed tasks no longer in memory and already "
-                "removed from the scheduler job queue. Note task groups on the "
-                "scheduler which have all tasks in the forgotten state are not included."
+                "removed from the scheduler job queue\n"
+                "Note: Task groups on the scheduler which have all tasks "
+                "in the forgotten state are not included."
             ),
             value=task_counter.get("forgotten", 0.0),
         )
@@ -105,8 +107,6 @@ class PrometheusHandler(RequestHandler):
     _collectors = None
 
     def __init__(self, *args, dask_server=None, **kwargs):
-        import prometheus_client
-
         super().__init__(*args, dask_server=dask_server, **kwargs)
 
         if PrometheusHandler._collectors:
@@ -124,7 +124,5 @@ class PrometheusHandler(RequestHandler):
             prometheus_client.REGISTRY.register(instantiated_collector)
 
     def get(self):
-        import prometheus_client
-
         self.write(prometheus_client.generate_latest())
         self.set_header("Content-Type", "text/plain; version=0.0.4")

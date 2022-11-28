@@ -2889,6 +2889,7 @@ async def test_startup_close_startup(s, a, b):
 
 
 @pytest.mark.filterwarnings("ignore:There is no current event loop:DeprecationWarning")
+@pytest.mark.filterwarnings("ignore:make_current is deprecated:DeprecationWarning")
 def test_startup_close_startup_sync(loop):
     with cluster() as (s, [a, b]):
         with Client(s["address"], loop=loop) as c:
@@ -5613,6 +5614,8 @@ async def test_future_auto_inform(c, s, a, b):
 
 
 @pytest.mark.filterwarnings("ignore:There is no current event loop:DeprecationWarning")
+@pytest.mark.filterwarnings("ignore:make_current is deprecated:DeprecationWarning")
+@pytest.mark.filterwarnings("ignore:clear_current is deprecated:DeprecationWarning")
 def test_client_async_before_loop_starts(cleanup):
     async def close():
         async with client:
@@ -5730,6 +5733,40 @@ async def test_logs(c, s, a, b):
     for log in n_logs.values():
         for _, msg in log:
             assert "distributed.nanny" in msg
+
+
+@gen_cluster(client=True, nthreads=[("", 1)], Worker=Nanny)
+async def test_logs_from_worker_submodules(c, s, a):
+    def on_worker(dask_worker):
+        from distributed.worker import logger as l1
+        from distributed.worker_state_machine import logger as l2
+
+        l1.info("AAA")
+        l2.info("BBB")
+        dask_worker.memory_manager.logger.info("CCC")
+
+    await c.run(on_worker)
+    logs = await c.get_worker_logs()
+    logs = [row[1].partition(" - ")[2] for row in logs[a.worker_address]]
+    assert logs[-3:] == [
+        "distributed.worker - INFO - AAA",
+        "distributed.worker.state_machine - INFO - BBB",
+        "distributed.worker.memory - INFO - CCC",
+    ]
+
+    def on_nanny(dask_worker):
+        from distributed.nanny import logger as l3
+
+        l3.info("DDD")
+        dask_worker.memory_manager.logger.info("EEE")
+
+    await c.run(on_nanny, nanny=True)
+    logs = await c.get_worker_logs(nanny=True)
+    logs = [row[1].partition(" - ")[2] for row in logs[a.worker_address]]
+    assert logs[-2:] == [
+        "distributed.nanny - INFO - DDD",
+        "distributed.nanny.memory - INFO - EEE",
+    ]
 
 
 @gen_cluster(client=True)
@@ -6536,7 +6573,7 @@ async def test_performance_report(c, s, a, b):
                 data = f.read()
         return data
 
-    # Ensure default kwarg maintains backward compatability
+    # Ensure default kwarg maintains backward compatibility
     data = await f(stacklevel=1)
 
     assert "Also, we want this comment to appear" in data
@@ -6590,9 +6627,9 @@ async def test_as_completed_condition_loop(c, s, a, b):
     sys.version_info >= (3, 10),
     reason="On Py3.10+ semaphore._loop is not bound until .acquire() blocks",
 )
-def test_client_connectionpool_semaphore_loop(s, a, b):
-    with Client(s["address"]) as c:
-        assert c.rpc.semaphore._loop is c.loop.asyncio_loop
+def test_client_connectionpool_semaphore_loop(s, a, b, loop):
+    with Client(s["address"], loop=loop) as c:
+        assert c.rpc.semaphore._loop is loop.asyncio_loop
 
 
 @pytest.mark.slow
@@ -6924,6 +6961,7 @@ async def test_workers_collection_restriction(c, s, a, b):
 
 
 @pytest.mark.filterwarnings("ignore:There is no current event loop:DeprecationWarning")
+@pytest.mark.filterwarnings("ignore:make_current is deprecated:DeprecationWarning")
 @gen_cluster(client=True, nthreads=[("127.0.0.1", 1)])
 async def test_get_client_functions_spawn_clusters(c, s, a):
     # see gh4565
@@ -7750,7 +7788,12 @@ if __name__ == "__main__":
 
 
 @pytest.mark.slow
-@pytest.mark.flaky(reruns=5, rerun_delay=10, only_rerun="Found blocklist match")
+# These lines sometimes appear:
+#     Creating scratch directories is taking a surprisingly long time
+#     Future exception was never retrieved
+#     tornado.util.TimeoutError
+#     Batched Comm Closed
+@pytest.mark.flaky(reruns=5, reruns_delay=5)
 @pytest.mark.parametrize("processes", [True, False])
 def test_quiet_close_process(processes, tmp_path):
     with open(tmp_path / "script.py", mode="w") as f:
@@ -7761,18 +7804,7 @@ def test_quiet_close_process(processes, tmp_path):
 
     lines = out.decode("utf-8").split("\n")
     lines = [stripped for line in lines if (stripped := line.strip())]
-
-    # List of frequent spurious messages that are beyond the scope of this test
-    blocklist = [
-        "Creating scratch directories is taking a surprisingly long time",
-        "Future exception was never retrieved",
-        "tornado.util.TimeoutError",
-    ]
-    lines2 = [line for line in lines if not any(ign in line for ign in blocklist)]
-    # Instant failure for messages not in blocklist
-    assert not lines2
-    # Retry up to 5 times if the only messages are in the blocklist
-    assert not lines, "Found blocklist match, retrying: " + str(lines)
+    assert not lines
 
 
 @gen_cluster(client=False, nthreads=[])
