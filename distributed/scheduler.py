@@ -1310,6 +1310,7 @@ class TaskState:
     #: Task annotations
     annotations: dict[str, Any]
 
+    #: TODO: Fix the description
     #: A counter that counts how often a task was already assigned to a Worker.
     #: This counter is used to sign a task such that the assigned Worker is
     #: expected to return the same counter in the task-finished message. This is
@@ -1328,7 +1329,9 @@ class TaskState:
     # Instances not part of slots since class variable
     _instances: ClassVar[weakref.WeakSet[TaskState]] = weakref.WeakSet()
 
-    def __init__(self, key: str, run_spec: object, state: TaskStateState):
+    def __init__(
+        self, key: str, run_spec: object, state: TaskStateState, transition_counter: int
+    ):
         self.key = key
         self._hash = hash(key)
         self.run_spec = run_spec
@@ -1362,7 +1365,7 @@ class TaskState:
         self.metadata = {}
         self.annotations = {}
         self.erred_on = set()
-        self._attempt = 0
+        self._attempt = transition_counter
         TaskState._instances.add(self)
 
     def __hash__(self) -> int:
@@ -1737,7 +1740,8 @@ class SchedulerState:
         computation: Computation | None = None,
     ) -> TaskState:
         """Create a new task, and associated states"""
-        ts = TaskState(key, spec, state)
+        self._increment_transition_counter()
+        ts = TaskState(key, spec, state, self.transition_counter)
 
         prefix_key = key_split(key)
         tp = self.task_prefixes.get(prefix_key)
@@ -1804,6 +1808,10 @@ class SchedulerState:
     #####################
     # State Transitions #
     #####################
+    def _increment_transition_counter(self):
+        self.transition_counter += 1
+        if self.transition_counter_max:
+            assert self.transition_counter < self.transition_counter_max
 
     def _transition(
         self, key: str, finish: TaskStateState, stimulus_id: str, **kwargs: Any
@@ -1839,10 +1847,7 @@ class SchedulerState:
             # - in case of transition through released, this counter is incremented by 2
             # - this increase happens before the actual transitions, so that it can
             #   catch potential infinite recursions
-            self.transition_counter += 1
-            if self.transition_counter_max:
-                assert self.transition_counter < self.transition_counter_max
-
+            self._increment_transition_counter()
             recommendations: dict = {}
             worker_msgs: dict = {}
             client_msgs: dict = {}
@@ -3266,7 +3271,8 @@ class SchedulerState:
         #        time to compute and submit this
         if duration < 0:
             duration = self.get_task_duration(ts)
-        ts._attempt += 1
+        self._increment_transition_counter()
+        ts._attempt = self.transition_counter
         msg: dict[str, Any] = {
             "op": "compute-task",
             "attempt": ts._attempt,
