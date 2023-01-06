@@ -294,7 +294,7 @@ class TaskState:
     #: the behaviour of transitions out of the ``executing``, ``flight`` etc. states.
     done: bool = False
 
-    attempt: int = 0
+    run_tag: int = 0
     _instances: ClassVar[weakref.WeakSet[TaskState]] = weakref.WeakSet()
 
     # Support for weakrefs to a class with __slots__
@@ -469,7 +469,7 @@ class TaskFinishedMsg(SendMessageToScheduler):
     metadata: dict
     thread: int | None
     startstops: list[StartStop]
-    attempt: int
+    run_tag: int
     __slots__ = tuple(__annotations__)
 
     def to_dict(self) -> dict[str, Any]:
@@ -760,7 +760,7 @@ class ComputeTaskEvent(StateMachineEvent):
     resource_restrictions: dict[str, float]
     actor: bool
     annotations: dict
-    attempt: int
+    run_tag: int
 
     __slots__ = tuple(__annotations__)
 
@@ -807,7 +807,7 @@ class ComputeTaskEvent(StateMachineEvent):
         resource_restrictions: dict[str, float] | None = None,
         actor: bool = False,
         annotations: dict | None = None,
-        attempt: int = 0,
+        run_tag: int = 0,
         stimulus_id: str,
     ) -> ComputeTaskEvent:
         """Build a dummy event, with most attributes set to a reasonable default.
@@ -827,7 +827,7 @@ class ComputeTaskEvent(StateMachineEvent):
             actor=actor,
             annotations=annotations or {},
             stimulus_id=stimulus_id,
-            attempt=attempt,
+            run_tag=run_tag,
         )
 
 
@@ -847,7 +847,7 @@ class ExecuteSuccessEvent(ExecuteDoneEvent):
     start: float
     stop: float
     nbytes: int
-    attempt: int
+    run_tag: int
     type: type | None
     __slots__ = tuple(__annotations__)
 
@@ -872,8 +872,8 @@ class ExecuteSuccessEvent(ExecuteDoneEvent):
     def dummy(
         key: str,
         value: object = None,
-        attempt: int | None = None,
         *,
+        run_tag: int = 0,
         nbytes: int = 1,
         stimulus_id: str,
     ) -> ExecuteSuccessEvent:
@@ -886,7 +886,7 @@ class ExecuteSuccessEvent(ExecuteDoneEvent):
             start=0.0,
             stop=1.0,
             nbytes=nbytes,
-            attempt=1,
+            run_tag=run_tag,
             type=None,
             stimulus_id=stimulus_id,
         )
@@ -1011,8 +1011,8 @@ class FreeKeysEvent(StateMachineEvent):
 
 
 @dataclass
-class FreeKeyByAttemptEvent(FreeKeysEvent):
-    attempts: Sequence[int]
+class FreeKeyByRunEvent(FreeKeysEvent):
+    run_tags: Sequence[int]
 
 
 @dataclass
@@ -1782,7 +1782,7 @@ class WorkerState:
         return None
 
     def _get_task_finished_msg(
-        self, ts: TaskState, stimulus_id: str, attempt: int
+        self, ts: TaskState, stimulus_id: str, run_tag: int
     ) -> TaskFinishedMsg:
         if ts.key not in self.data and ts.key not in self.actors:
             raise RuntimeError(f"Task {ts} not ready")
@@ -1809,7 +1809,7 @@ class WorkerState:
             metadata=ts.metadata,
             thread=self.threads.get(ts.key),
             startstops=ts.startstops,
-            attempt=attempt,
+            run_tag=run_tag,
             stimulus_id=stimulus_id,
         )
 
@@ -2446,13 +2446,13 @@ class WorkerState:
         return self._ensure_computing()
 
     def _transition_executing_memory(
-        self, ts: TaskState, value: object, attempt: int, *, stimulus_id: str
+        self, ts: TaskState, value: object, run_tag: int, *, stimulus_id: str
     ) -> RecsInstrs:
         """This transition is *normally* triggered by ExecuteSuccessEvent.
         However, beware that it can also be triggered by scatter().
         """
         return self._transition_to_memory(
-            ts, value, "task-finished", attempt=attempt, stimulus_id=stimulus_id
+            ts, value, "task-finished", run_tag=run_tag, stimulus_id=stimulus_id
         )
 
     def _transition_released_memory(
@@ -2460,7 +2460,7 @@ class WorkerState:
     ) -> RecsInstrs:
         """This transition is triggered by scatter()"""
         return self._transition_to_memory(
-            ts, value, "add-keys", attempt=-1, stimulus_id=stimulus_id
+            ts, value, "add-keys", run_tag=-1, stimulus_id=stimulus_id
         )
 
     def _transition_flight_memory(
@@ -2470,11 +2470,11 @@ class WorkerState:
         However, beware that it can also be triggered by scatter().
         """
         return self._transition_to_memory(
-            ts, value, "add-keys", attempt=-1, stimulus_id=stimulus_id
+            ts, value, "add-keys", run_tag=-1, stimulus_id=stimulus_id
         )
 
     def _transition_resumed_memory(
-        self, ts: TaskState, value: object, attempt: int, *, stimulus_id: str
+        self, ts: TaskState, value: object, run_tag: int, *, stimulus_id: str
     ) -> RecsInstrs:
         """Normally, we send to the scheduler a 'task-finished' message for a completed
         execution and 'add-data' for a completed replication from another worker. The
@@ -2497,7 +2497,7 @@ class WorkerState:
         ts.previous = None
         ts.next = None
         return self._transition_to_memory(
-            ts, value, msg_type, attempt=attempt, stimulus_id=stimulus_id
+            ts, value, msg_type, run_tag=run_tag, stimulus_id=stimulus_id
         )
 
     def _transition_to_memory(
@@ -2505,7 +2505,7 @@ class WorkerState:
         ts: TaskState,
         value: object,
         msg_type: Literal["add-keys", "task-finished"],
-        attempt: int,
+        run_tag: int,
         *,
         stimulus_id: str,
     ) -> RecsInstrs:
@@ -2524,7 +2524,7 @@ class WorkerState:
             assert msg_type == "task-finished"
             instrs.append(
                 self._get_task_finished_msg(
-                    ts, stimulus_id=stimulus_id, attempt=attempt
+                    ts, stimulus_id=stimulus_id, run_tag=run_tag
                 )
             )
         return recs, instrs
@@ -2822,18 +2822,16 @@ class WorkerState:
         return recommendations, []
 
     @_handle_event.register
-    def _handle_free_keys_attempt(self, ev: FreeKeyByAttemptEvent) -> RecsInstrs:
+    def _handle_free_run_keys(self, ev: FreeKeyByRunEvent) -> RecsInstrs:
         """Handler to be called by the scheduler.
 
-        Similar to _handle_free_keys but will only act if the provided attempt counter matches the known one
+        Similar to _handle_free_keys but will only act if the provided run tag matches the known one
         """
-        self.log.append(
-            ("free-keys-by-attempt", ev.keys, ev.attempts, ev.stimulus_id, time())
-        )
+        self.log.append(("free-run-keys", ev.keys, ev.run_tags, ev.stimulus_id, time()))
         recommendations: Recs = {}
-        for key, attempt in zip(ev.keys, ev.attempts):
+        for key, run_tag in zip(ev.keys, ev.run_tags):
             ts = self.tasks.get(key)
-            if ts and ts.attempt == attempt:
+            if ts and ts.run_tag == run_tag:
                 recommendations[ts] = "released"
         return recommendations, []
 
@@ -2916,7 +2914,7 @@ class WorkerState:
         except KeyError:
             self.tasks[ev.key] = ts = TaskState(ev.key)
         self.log.append((ev.key, "compute-task", ts.state, ev.stimulus_id, time()))
-        ts.attempt = ev.attempt
+        ts.run_tag = ev.run_tag
         recommendations: Recs = {}
         instructions: Instructions = []
 
@@ -2929,7 +2927,7 @@ class WorkerState:
         elif ts.state == "memory":
             instructions.append(
                 self._get_task_finished_msg(
-                    ts, stimulus_id=ev.stimulus_id, attempt=ev.attempt
+                    ts, stimulus_id=ev.stimulus_id, run_tag=ev.run_tag
                 )
             )
         elif ts.state == "error":
@@ -3026,7 +3024,7 @@ class WorkerState:
         recommendations: Recs = {}
         for ts in self._gather_dep_done_common(ev):
             if ts.key in ev.data:
-                recommendations[ts] = ("memory", ev.data[ts.key], ts.attempt)
+                recommendations[ts] = ("memory", ev.data[ts.key], ts.run_tag)
             else:
                 self.log.append((ts.key, "missing-dep", ev.stimulus_id, time()))
                 if self.validate:
@@ -3221,7 +3219,7 @@ class WorkerState:
         )
         ts.nbytes = ev.nbytes
         ts.type = ev.type
-        recs[ts] = ("memory", ev.value, ev.attempt)
+        recs[ts] = ("memory", ev.value, ev.run_tag)
         return recs, instr
 
     @_handle_event.register

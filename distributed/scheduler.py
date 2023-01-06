@@ -1317,7 +1317,7 @@ class TaskState:
     #: used to correlate responses.
     #: Only the most recently assigned worker is trusted. All other results
     #: will be rejected
-    _attempt: int
+    _run_tag: int
 
     #: Cached hash of :attr:`~TaskState.client_key`
     _hash: int
@@ -1329,9 +1329,7 @@ class TaskState:
     # Instances not part of slots since class variable
     _instances: ClassVar[weakref.WeakSet[TaskState]] = weakref.WeakSet()
 
-    def __init__(
-        self, key: str, run_spec: object, state: TaskStateState, transition_counter: int
-    ):
+    def __init__(self, key: str, run_spec: object, state: TaskStateState, run_tag: int):
         self.key = key
         self._hash = hash(key)
         self.run_spec = run_spec
@@ -1365,7 +1363,7 @@ class TaskState:
         self.metadata = {}
         self.annotations = {}
         self.erred_on = set()
-        self._attempt = transition_counter
+        self._run_tag = run_tag
         TaskState._instances.add(self)
 
     def __hash__(self) -> int:
@@ -1586,6 +1584,7 @@ class SchedulerState:
 
     _task_prefix_count_global: defaultdict[str, int]
     _network_occ_global: float
+    _run_tag_counter: itertools.count
     ######################
     # Cached configuration
     ######################
@@ -1666,7 +1665,7 @@ class SchedulerState:
         self.transition_counter = 0
         self._idle_transition_counter = 0
         self.transition_counter_max = transition_counter_max
-
+        self._run_tag_counter = itertools.count()
         # Variables from dask.config, cached by __init__ for performance
         self.UNKNOWN_TASK_DURATION = parse_timedelta(
             dask.config.get("distributed.scheduler.unknown-task-duration")
@@ -1740,8 +1739,7 @@ class SchedulerState:
         computation: Computation | None = None,
     ) -> TaskState:
         """Create a new task, and associated states"""
-        self._increment_transition_counter()
-        ts = TaskState(key, spec, state, self.transition_counter)
+        ts = TaskState(key, spec, state, next(self._run_tag_counter))
 
         prefix_key = key_split(key)
         tp = self.task_prefixes.get(prefix_key)
@@ -1808,11 +1806,6 @@ class SchedulerState:
     #####################
     # State Transitions #
     #####################
-    def _increment_transition_counter(self):
-        self.transition_counter += 1
-        if self.transition_counter_max:
-            assert self.transition_counter < self.transition_counter_max
-
     def _transition(
         self, key: str, finish: TaskStateState, stimulus_id: str, **kwargs: Any
     ) -> RecsMsgs:
@@ -1847,7 +1840,11 @@ class SchedulerState:
             # - in case of transition through released, this counter is incremented by 2
             # - this increase happens before the actual transitions, so that it can
             #   catch potential infinite recursions
-            self._increment_transition_counter()
+
+            self.transition_counter += 1
+            if self.transition_counter_max:
+                assert self.transition_counter < self.transition_counter_max
+
             recommendations: dict = {}
             worker_msgs: dict = {}
             client_msgs: dict = {}
@@ -3271,11 +3268,10 @@ class SchedulerState:
         #        time to compute and submit this
         if duration < 0:
             duration = self.get_task_duration(ts)
-        self._increment_transition_counter()
-        ts._attempt = self.transition_counter
+        ts._run_tag = next(self._run_tag_counter)
         msg: dict[str, Any] = {
             "op": "compute-task",
-            "attempt": ts._attempt,
+            "run_tag": ts._run_tag,
             "key": ts.key,
             "priority": ts.priority,
             "duration": duration,
@@ -4636,7 +4632,7 @@ class Scheduler(SchedulerState, ServerNode):
 
         self.transitions(recommendations, stimulus_id)
 
-    def stimulus_task_finished(self, key, worker, stimulus_id, attempt, **kwargs):
+    def stimulus_task_finished(self, key, worker, stimulus_id, run_tag, **kwargs):
         """Mark that a task has finished execution on a particular worker"""
         logger.debug("Stimulus task finished %s, %s", key, worker)
 
@@ -4646,7 +4642,7 @@ class Scheduler(SchedulerState, ServerNode):
 
         ws: WorkerState = self.workers[worker]
         ts: TaskState = self.tasks.get(key)
-        if ts is None or ts._attempt != attempt:
+        if ts is None or ts._run_tag != run_tag:
             logger.debug(
                 "Received already computed task, worker: %s, state: %s"
                 ", key: %s, who_has: %s",
@@ -4660,7 +4656,7 @@ class Scheduler(SchedulerState, ServerNode):
                     "op": "free-keys",
                     "keys": [key],
                     "stimulus_id": stimulus_id,
-                    "attempts": [attempt],
+                    "run_tags": [run_tag],
                 }
             ]
         elif ts.state == "memory":
