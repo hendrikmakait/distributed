@@ -2242,7 +2242,8 @@ class Worker(BaseWorker, ServerNode):
 
         # The key *must* be in the worker state thanks to the cancelled state
         ts = self.state.tasks[key]
-        run_tag = ts.run_tag
+        run_id = ts.run_id
+        assert run_id
 
         try:
             function, args, kwargs = await self._maybe_deserialize_task(ts)
@@ -2319,7 +2320,7 @@ class Worker(BaseWorker, ServerNode):
                     stop=result["stop"],
                     nbytes=result["nbytes"],
                     type=result["type"],
-                    run_tag=run_tag,
+                    run_id=run_id,
                     stimulus_id=f"task-finished-{time()}",
                 )
 

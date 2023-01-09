@@ -1310,14 +1310,13 @@ class TaskState:
     #: Task annotations
     annotations: dict[str, Any]
 
-    #: TODO: Fix the description
-    #: A counter that counts how often a task was already assigned to a Worker.
-    #: This counter is used to sign a task such that the assigned Worker is
-    #: expected to return the same counter in the task-finished message. This is
-    #: used to correlate responses.
-    #: Only the most recently assigned worker is trusted. All other results
-    #: will be rejected
-    _run_tag: int
+    #: The unique identifier of a specific execution of a task. This identifier
+    #: is used to sign a task such that the assigned worker is expected to return
+    #: the same identifier in the task-finished message. This is used to correlate
+    #: responses.
+    #: Only the most recently assigned worker is trusted. All other results will
+    #: be rejected.
+    run_id: int | None
 
     #: Cached hash of :attr:`~TaskState.client_key`
     _hash: int
@@ -1329,7 +1328,13 @@ class TaskState:
     # Instances not part of slots since class variable
     _instances: ClassVar[weakref.WeakSet[TaskState]] = weakref.WeakSet()
 
-    def __init__(self, key: str, run_spec: object, state: TaskStateState, run_tag: int):
+    def __init__(
+        self,
+        key: str,
+        run_spec: object,
+        state: TaskStateState,
+        run_id: int | None = None,
+    ):
         self.key = key
         self._hash = hash(key)
         self.run_spec = run_spec
@@ -1363,7 +1368,7 @@ class TaskState:
         self.metadata = {}
         self.annotations = {}
         self.erred_on = set()
-        self._run_tag = run_tag
+        self.run_id = run_id
         TaskState._instances.add(self)
 
     def __hash__(self) -> int:
@@ -1584,7 +1589,7 @@ class SchedulerState:
 
     _task_prefix_count_global: defaultdict[str, int]
     _network_occ_global: float
-    _run_tag_counter: itertools.count
+    _run_id_counter: itertools.count
     ######################
     # Cached configuration
     ######################
@@ -1665,7 +1670,7 @@ class SchedulerState:
         self.transition_counter = 0
         self._idle_transition_counter = 0
         self.transition_counter_max = transition_counter_max
-        self._run_tag_counter = itertools.count()
+        self._run_id_counter = itertools.count()
         # Variables from dask.config, cached by __init__ for performance
         self.UNKNOWN_TASK_DURATION = parse_timedelta(
             dask.config.get("distributed.scheduler.unknown-task-duration")
@@ -1739,7 +1744,7 @@ class SchedulerState:
         computation: Computation | None = None,
     ) -> TaskState:
         """Create a new task, and associated states"""
-        ts = TaskState(key, spec, state, next(self._run_tag_counter))
+        ts = TaskState(key, spec, state)
 
         prefix_key = key_split(key)
         tp = self.task_prefixes.get(prefix_key)
@@ -3267,10 +3272,10 @@ class SchedulerState:
         #        time to compute and submit this
         if duration < 0:
             duration = self.get_task_duration(ts)
-        ts._run_tag = next(self._run_tag_counter)
+        ts.run_id = next(self._run_id_counter)
         msg: dict[str, Any] = {
             "op": "compute-task",
-            "run_tag": ts._run_tag,
+            "run_id": ts.run_id,
             "key": ts.key,
             "priority": ts.priority,
             "duration": duration,
@@ -4631,7 +4636,7 @@ class Scheduler(SchedulerState, ServerNode):
 
         self.transitions(recommendations, stimulus_id)
 
-    def stimulus_task_finished(self, key, worker, stimulus_id, run_tag, **kwargs):
+    def stimulus_task_finished(self, key, worker, stimulus_id, run_id, **kwargs):
         """Mark that a task has finished execution on a particular worker"""
         logger.debug("Stimulus task finished %s, %s", key, worker)
 
@@ -4641,7 +4646,7 @@ class Scheduler(SchedulerState, ServerNode):
 
         ws: WorkerState = self.workers[worker]
         ts: TaskState = self.tasks.get(key)
-        if ts is None or ts._run_tag != run_tag:
+        if ts is None or ts.run_id != run_id:
             logger.debug(
                 "Received already computed task, worker: %s, state: %s"
                 ", key: %s, who_has: %s",
@@ -4655,7 +4660,7 @@ class Scheduler(SchedulerState, ServerNode):
                     "op": "free-keys",
                     "keys": [key],
                     "stimulus_id": stimulus_id,
-                    "run_tags": [run_tag],
+                    "run_ids": [run_id],
                 }
             ]
         elif ts.state == "memory":
