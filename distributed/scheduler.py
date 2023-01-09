@@ -1840,7 +1840,6 @@ class SchedulerState:
             # - in case of transition through released, this counter is incremented by 2
             # - this increase happens before the actual transitions, so that it can
             #   catch potential infinite recursions
-
             self.transition_counter += 1
             if self.transition_counter_max:
                 assert self.transition_counter < self.transition_counter_max

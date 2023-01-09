@@ -363,7 +363,7 @@ def test_computetask_to_dict():
         function=b"blob",
         args=b"blob",
         kwargs=None,
-        attempt=5,
+        run_tag=5,
     )
     assert ev.run_spec == SerializedTask(function=b"blob", args=b"blob")
     ev2 = ev.to_loggable(handled=11.22)
@@ -387,7 +387,7 @@ def test_computetask_to_dict():
         "function": None,
         "args": None,
         "kwargs": None,
-        "attempt": 5,
+        "run_tag": 5,
     }
     ev3 = StateMachineEvent.from_dict(d)
     assert isinstance(ev3, ComputeTaskEvent)
@@ -411,7 +411,7 @@ def test_computetask_dummy():
         function=None,
         args=None,
         kwargs=None,
-        attempt=0,
+        run_tag=0,
     )
 
     # nbytes is generated from who_has if omitted
@@ -452,6 +452,7 @@ def test_executesuccess_to_dict():
         stop=456.7,
         nbytes=890,
         type=int,
+        run_tag=5,
     )
     ev2 = ev.to_loggable(handled=11.22)
     assert ev2.value is None
@@ -467,6 +468,7 @@ def test_executesuccess_to_dict():
         "start": 123.4,
         "stop": 456.7,
         "type": "<class 'int'>",
+        "run_tag": 5,
     }
     ev3 = StateMachineEvent.from_dict(d)
     assert isinstance(ev3, ExecuteSuccessEvent)
@@ -478,6 +480,7 @@ def test_executesuccess_to_dict():
     assert ev3.stop == 456.7
     assert ev3.nbytes == 890
     assert ev3.type is None
+    assert ev3.run_tag == 5
 
 
 def test_executesuccess_dummy():
@@ -490,6 +493,7 @@ def test_executesuccess_dummy():
         nbytes=1,
         type=None,
         stimulus_id="s",
+        run_tag=0,
     )
 
     ev2 = ExecuteSuccessEvent.dummy("x", 123, stimulus_id="s")
