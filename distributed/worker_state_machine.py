@@ -2467,7 +2467,7 @@ class WorkerState:
         )
 
     def _transition_flight_memory(
-        self, ts: TaskState, value: object, *, run_id: int, stimulus_id: str
+        self, ts: TaskState, value: object, run_id: int, *, stimulus_id: str
     ) -> RecsInstrs:
         """This transition is *normally* triggered by GatherDepSuccessEvent.
         However, beware that it can also be triggered by scatter().
