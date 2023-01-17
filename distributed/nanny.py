@@ -19,6 +19,7 @@ from queue import Empty
 from time import sleep as sync_sleep
 from typing import TYPE_CHECKING, Callable, ClassVar, Literal
 
+from opentelemetry import trace
 from toolz import merge
 from tornado.ioloop import IOLoop
 
@@ -64,6 +65,7 @@ if TYPE_CHECKING:
     from distributed.diagnostics.plugin import NannyPlugin
 
 logger = logging.getLogger(__name__)
+tracer = trace.get_tracer(__name__)
 
 
 class Nanny(ServerNode):
@@ -304,12 +306,13 @@ class Nanny(ServerNode):
             return
 
         try:
-            await asyncio.wait_for(
-                self.scheduler.unregister(
-                    address=self.worker_address, stimulus_id=f"nanny-close-{time()}"
-                ),
-                timeout,
-            )
+            with tracer.start_as_current_span("nanny-close"):
+                await asyncio.wait_for(
+                    self.scheduler.unregister(
+                        address=self.worker_address, stimulus_id=f"nanny-close-{time()}"
+                    ),
+                    timeout,
+                )
         except (asyncio.TimeoutError, CommClosedError, OSError, RPCClosed):
             pass
 

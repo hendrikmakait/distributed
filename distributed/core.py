@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
 import sys
@@ -14,7 +15,6 @@ from collections import defaultdict, deque
 from collections.abc import Container, Coroutine
 from enum import Enum
 from functools import partial
-from time import time_ns
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, TypedDict, TypeVar, final
 
 import tblib
@@ -749,7 +749,6 @@ class Server:
         await self
         try:
             while not self.__stopped:
-                start_time = time_ns()
                 try:
                     msg = await comm.read()
                     logger.debug("Message from %r: %s", address, msg)
@@ -783,9 +782,13 @@ class Server:
                     ) from e
                 carrier = msg.pop("otel_context", None)
                 context = propagate.extract(carrier) if carrier is not None else None
-                with tracer.start_as_current_span(
-                    f"COMM HANDLER: {op}", context=context, start_time=start_time
-                ):
+                if op not in ("heartbeat_worker", "identity"):
+                    ctx = tracer.start_as_current_span(
+                        f"COMM HANDLER: {op}", context=context
+                    )
+                else:
+                    ctx = contextlib.suppress()
+                with ctx:
                     if self.counters is not None:
                         self.counters["op"].add(op)
                     self._comms[comm] = op
@@ -884,7 +887,6 @@ class Server:
         closed = False
         try:
             while not closed:
-                start_time = time_ns()
                 try:
                     msgs = await comm.read()
                 # If another coroutine has closed the comm, stop handling the stream.
@@ -918,30 +920,31 @@ class Server:
                         if iscoroutinefunction(handler):
 
                             async def instrumented_handler(
-                                handler, op, context, start_time, kwargs
+                                handler, op, context, kwargs
                             ):
                                 with tracer.start_as_current_span(
                                     f"STREAM HANDLER: {op}",
                                     context=context,
-                                    start_time=start_time,
                                 ):
-                                    return await handler(kwargs)
+                                    return await handler(**kwargs)
 
                             self._ongoing_background_tasks.call_soon(
                                 instrumented_handler,
                                 handler,
                                 op,
                                 context,
-                                start_time,
                                 merge(extra, msg),
                             )
                             await asyncio.sleep(0)
                         else:
-                            with tracer.start_as_current_span(
-                                f"STREAM HANDLER: {op}",
-                                context=context,
-                                start_time=start_time,
-                            ):
+                            if op not in ("heartbeat-client"):
+                                ctx = tracer.start_as_current_span(
+                                    f"STREAM HANDLER: {op}",
+                                    context=context,
+                                )
+                            else:
+                                ctx = contextlib.suppress()
+                            with ctx:
                                 handler(**merge(extra, msg))
                     else:
                         logger.error("odd message %s", msg)

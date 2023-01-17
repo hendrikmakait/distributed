@@ -12,6 +12,8 @@ from collections import defaultdict
 from collections.abc import Generator
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
+from opentelemetry import trace
+
 import dask
 from dask.utils import parse_timedelta
 
@@ -28,6 +30,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 # Per-task logging. Exceptionally verbose at DEBUG level.
 task_logger = logging.getLogger(__name__ + ".tasks")
+
+tracer = trace.get_tracer(__name__)
 
 
 class ActiveMemoryManagerExtension:
@@ -405,16 +409,17 @@ class ActiveMemoryManagerExtension:
                 drop_by_worker[ws].append(ts.key)
 
         stimulus_id = f"active_memory_manager-{time()}"
-        for ws, keys in repl_by_worker.items():
-            logger.debug("- %s to acquire %d replicas", ws, len(keys))
-            self.scheduler.request_acquire_replicas(
-                ws.address, keys, stimulus_id=stimulus_id
-            )
-        for ws, keys in drop_by_worker.items():
-            logger.debug("- %s to drop %d replicas", ws, len(keys))
-            self.scheduler.request_remove_replicas(
-                ws.address, keys, stimulus_id=stimulus_id
-            )
+        with tracer.start_as_current_span("active_memory_manager"):
+            for ws, keys in repl_by_worker.items():
+                logger.debug("- %s to acquire %d replicas", ws, len(keys))
+                self.scheduler.request_acquire_replicas(
+                    ws.address, keys, stimulus_id=stimulus_id
+                )
+            for ws, keys in drop_by_worker.items():
+                logger.debug("- %s to drop %d replicas", ws, len(keys))
+                self.scheduler.request_remove_replicas(
+                    ws.address, keys, stimulus_id=stimulus_id
+                )
 
 
 class Suggestion(NamedTuple):

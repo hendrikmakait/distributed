@@ -9,6 +9,7 @@ from math import log2
 from time import time
 from typing import TYPE_CHECKING, Any, ClassVar, TypedDict, cast
 
+from opentelemetry import trace
 from tlz import topk
 
 import dask
@@ -30,7 +31,7 @@ if TYPE_CHECKING:
 LATENCY = 0.1
 
 logger = logging.getLogger(__name__)
-
+tracer = trace.get_tracer(__name__)
 
 LOG_PDB = dask.config.get("distributed.admin.pdb-on-err")
 
@@ -279,40 +280,41 @@ class WorkStealing(SchedulerPlugin):
             # Stimulus IDs are used to verify the response, see
             # `move_task_confirm`. Therefore, this must be truly unique.
             stimulus_id = f"steal-{self._request_counter}"
-            self._request_counter += 1
+            with tracer.start_as_current_span("steal"):
+                self._request_counter += 1
 
-            key = ts.key
-            self.remove_key_from_stealable(ts)
-            logger.debug(
-                "Request move %s, %s: %2f -> %s: %2f",
-                key,
-                victim,
-                victim.occupancy,
-                thief,
-                thief.occupancy,
-            )
+                key = ts.key
+                self.remove_key_from_stealable(ts)
+                logger.debug(
+                    "Request move %s, %s: %2f -> %s: %2f",
+                    key,
+                    victim,
+                    victim.occupancy,
+                    thief,
+                    thief.occupancy,
+                )
 
-            # TODO: occupancy no longer concats linearly so we can't easily
-            # assume that the network cost would go down by that much
-            victim_duration = self.scheduler.get_task_duration(
-                ts
-            ) + self.scheduler.get_comm_cost(ts, victim)
-            thief_duration = self.scheduler.get_task_duration(
-                ts
-            ) + self.scheduler.get_comm_cost(ts, thief)
+                # TODO: occupancy no longer concats linearly so we can't easily
+                # assume that the network cost would go down by that much
+                victim_duration = self.scheduler.get_task_duration(
+                    ts
+                ) + self.scheduler.get_comm_cost(ts, victim)
+                thief_duration = self.scheduler.get_task_duration(
+                    ts
+                ) + self.scheduler.get_comm_cost(ts, thief)
 
-            self.scheduler.stream_comms[victim.address].send(
-                {"op": "steal-request", "key": key, "stimulus_id": stimulus_id}
-            )
-            info: InFlightInfo = {
-                "victim": victim,  # guaranteed to be processing_on
-                "thief": thief,
-                "victim_duration": victim_duration,
-                "thief_duration": thief_duration,
-                "stimulus_id": stimulus_id,
-            }
-            self._add_to_in_flight(ts, info)
-            return stimulus_id
+                self.scheduler.stream_comms[victim.address].send(
+                    {"op": "steal-request", "key": key, "stimulus_id": stimulus_id}
+                )
+                info: InFlightInfo = {
+                    "victim": victim,  # guaranteed to be processing_on
+                    "thief": thief,
+                    "victim_duration": victim_duration,
+                    "thief_duration": thief_duration,
+                    "stimulus_id": stimulus_id,
+                }
+                self._add_to_in_flight(ts, info)
+                return stimulus_id
         except CommClosedError:
             logger.info("Worker comm %r closed while stealing: %r", victim, ts)
             return "comm-closed"

@@ -30,6 +30,7 @@ from datetime import timedelta
 from inspect import isawaitable
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, TextIO, TypeVar, cast
 
+from opentelemetry import trace
 from tlz import first, keymap, pluck
 from tornado.ioloop import IOLoop
 
@@ -146,6 +147,7 @@ if TYPE_CHECKING:
     T = TypeVar("T")
 
 logger = logging.getLogger(__name__)
+tracer = trace.get_tracer(__name__)
 
 LOG_PDB = dask.config.get("distributed.admin.pdb-on-err")
 
@@ -982,15 +984,16 @@ class Worker(BaseWorker, ServerNode):
 
         ServerNode.status.__set__(self, value)  # type: ignore
         stimulus_id = f"worker-status-change-{time()}"
-        self._send_worker_status_change(stimulus_id)
+        with tracer.start_as_current_span("worker-status-change"):
+            self._send_worker_status_change(stimulus_id)
 
-        if prev_status == Status.running and value != Status.running:
-            self.handle_stimulus(PauseEvent(stimulus_id=stimulus_id))
-        elif value == Status.running and prev_status in (
-            Status.paused,
-            Status.closing_gracefully,
-        ):
-            self.handle_stimulus(UnpauseEvent(stimulus_id=stimulus_id))
+            if prev_status == Status.running and value != Status.running:
+                self.handle_stimulus(PauseEvent(stimulus_id=stimulus_id))
+            elif value == Status.running and prev_status in (
+                Status.paused,
+                Status.closing_gracefully,
+            ):
+                self.handle_stimulus(UnpauseEvent(stimulus_id=stimulus_id))
 
     def _send_worker_status_change(self, stimulus_id: str) -> None:
         self.batched_send(
