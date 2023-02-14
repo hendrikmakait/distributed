@@ -238,6 +238,10 @@ class ShuffleRun(Generic[ShuffleUnitIDType, PartitionIDType, PartitionType], abc
         raise NotImplementedError
 
 
+class ShuffleList(list):
+    pass
+
+
 class ArrayRechunkRun(ShuffleRun[tuple[NIndex, NIndex], NIndex, "np.ndarray"]):
     """State for a single active rechunk execution
 
@@ -392,7 +396,7 @@ class ArrayRechunkRun(ShuffleRun[tuple[NIndex, NIndex], NIndex, "np.ndarray"]):
         def _() -> dict[str, list[tuple[tuple[NIndex, NIndex], bytes]]]:
 
             out: dict[str, list[tuple[tuple[NIndex, NIndex], bytes]]] = defaultdict(
-                list
+                ShuffleList
             )
             for new_index, subdim_index, slices in self._mapping[input_partition]:
                 out[self.worker_for[new_index]].append(
