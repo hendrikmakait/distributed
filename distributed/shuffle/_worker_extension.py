@@ -838,6 +838,7 @@ class ShuffleWorkerExtension:
                 memory_limiter_comms=self.memory_limiter_comms,
             )
         elif result["type"] == "ArrayRechunk":
+            logger.info(f"Initialize shuffle {shuffle_id}[{result['run_id']}]")
             shuffle = ArrayRechunkRun(
                 worker_for=result["worker_for"],
                 output_workers=result["output_workers"],
