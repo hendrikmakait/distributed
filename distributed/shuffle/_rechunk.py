@@ -160,3 +160,12 @@ def rechunk_slicing(
             old_index, nslice = zip(*sliced_chunk)
             slicing[old_index].append((ShardID(new_index, shard_index), nslice))
     return slicing
+
+class Slicer:
+    def __init__(self, old: ChunkedAxes, new: ChunkedAxes) -> None:
+        self._old = old
+        self._new = new
+        self._slicing = rechunk_slicing(old, new)
+    
+    def slice(self, partition: NIndex):
+        return self._slicing[partition]
