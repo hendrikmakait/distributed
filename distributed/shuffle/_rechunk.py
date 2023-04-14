@@ -163,8 +163,6 @@ def rechunk_slicing(
 
 class Slicer:
     def __init__(self, old: ChunkedAxes, new: ChunkedAxes) -> None:
-        self._old = old
-        self._new = new
         self._slicing = rechunk_slicing(old, new)
     
     def slice(self, partition: NIndex):
