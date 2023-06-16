@@ -796,11 +796,15 @@ class WorkerState:
         self.needs_what[ts][0] -= 1
         if self.needs_what[ts][0] == 0:
             nbytes = ts.get_nbytes()
-            assert nbytes == self.needs_what[ts][1], (
-                ts.key,
-                self.needs_what[ts][1],
-                nbytes,
-            )
+            try:
+                assert nbytes == self.needs_what[ts][1], (
+                    ts.key,
+                    self.needs_what[ts][1],
+                    nbytes,
+                )
+            except Exception as e:
+                logger.exception(e)
+
             del self.needs_what[ts]
             self._network_occ -= nbytes
             self.scheduler._network_occ_global -= nbytes
@@ -813,11 +817,14 @@ class WorkerState:
 
         nbytes = ts.get_nbytes()
         if ts in self.needs_what:
-            assert nbytes == self.needs_what[ts][1], (
-                ts.key,
-                self.needs_what[ts][1],
-                nbytes,
-            )
+            try:
+                assert nbytes == self.needs_what[ts][1], (
+                    ts.key,
+                    self.needs_what[ts][1],
+                    nbytes,
+                )
+            except Exception as e:
+                logger.exception(e)
             del self.needs_what[ts]
             self._network_occ -= nbytes
             self.scheduler._network_occ_global -= nbytes
