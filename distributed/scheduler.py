@@ -492,7 +492,7 @@ class WorkerState:
     #: Much like `processing`, this does not exactly reflect worker state:
     #: keys here may be queued to fetch, in flight, or already in memory
     #: on the worker.
-    needs_what: dict[TaskState, int]
+    needs_what: dict[TaskState, list[int]]
 
     __slots__ = tuple(__annotations__)
 
@@ -782,21 +782,26 @@ class WorkerState:
             assert self not in ts.who_has
             assert ts not in self.has_what
         if ts not in self.needs_what:
-            self.needs_what[ts] = 1
             nbytes = ts.get_nbytes()
+            self.needs_what[ts] = [1, nbytes]
             self._network_occ += nbytes
             self.scheduler._network_occ_global += nbytes
         else:
-            self.needs_what[ts] += 1
+            self.needs_what[ts][0] += 1
 
     def _dec_needs_replica(self, ts: TaskState) -> None:
         if self.scheduler.validate:
             assert ts in self.needs_what
 
-        self.needs_what[ts] -= 1
-        if self.needs_what[ts] == 0:
-            del self.needs_what[ts]
+        self.needs_what[ts][0] -= 1
+        if self.needs_what[ts][0] == 0:
             nbytes = ts.get_nbytes()
+            assert nbytes == self.needs_what[ts][1], (
+                ts.key,
+                self.needs_what[ts][1],
+                nbytes,
+            )
+            del self.needs_what[ts]
             self._network_occ -= nbytes
             self.scheduler._network_occ_global -= nbytes
 
@@ -808,6 +813,11 @@ class WorkerState:
 
         nbytes = ts.get_nbytes()
         if ts in self.needs_what:
+            assert nbytes == self.needs_what[ts][1], (
+                ts.key,
+                self.needs_what[ts][1],
+                nbytes,
+            )
             del self.needs_what[ts]
             self._network_occ -= nbytes
             self.scheduler._network_occ_global -= nbytes
@@ -5320,11 +5330,14 @@ class Scheduler(SchedulerState, ServerNode):
                 if ws.status == Status.running:
                     assert ws.address in self.idle
             assert not ws.needs_what.keys() & ws.has_what
-            actual_needs_what: defaultdict[TaskState, int] = defaultdict(int)
+            actual_needs_what: dict[TaskState, list[int]] = {}
             for ts in ws.processing:
                 for tss in ts.dependencies:
                     if tss not in ws.has_what:
-                        actual_needs_what[tss] += 1
+                        if tss not in actual_needs_what:
+                            actual_needs_what[tss] = [1, ts.get_nbytes()]
+                        else:
+                            actual_needs_what[tss][0] += 1
             assert actual_needs_what == ws.needs_what
             assert (ws.status == Status.running) == (ws in self.running)
             for name, count in ws.task_prefix_count.items():
