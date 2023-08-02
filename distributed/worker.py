@@ -1537,6 +1537,10 @@ class Worker(BaseWorker, ServerNode):
             logger.info("Not waiting on executor to close")
         self.status = Status.closing
 
+        if nanny and self.nanny:
+            with self.rpc(self.nanny) as r:
+                await r.close_gracefully(reason=reason)
+
         # Stop callbacks before giving up control in any `await`.
         # We don't want to heartbeat while closing.
         for pc in self.periodic_callbacks.values():
@@ -1558,10 +1562,6 @@ class Worker(BaseWorker, ServerNode):
                 result = extension.close()
                 if isawaitable(result):
                     await result
-
-        if nanny and self.nanny:
-            with self.rpc(self.nanny) as r:
-                await r.close_gracefully(reason=reason)
 
         setproctitle("dask worker [closing]")
 
