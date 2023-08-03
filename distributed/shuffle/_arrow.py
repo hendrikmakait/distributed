@@ -67,8 +67,8 @@ def convert_partition(data: bytes, meta: pd.DataFrame) -> pd.DataFrame:
             return pd.StringDtype("pyarrow")
         return None
 
-    return table.to_pandas()
-    # df = table.to_pandas(self_destruct=True, types_mapper=default_types_mapper)
+    # df = table.to_pandas()
+    return table.to_pandas(self_destruct=True, types_mapper=default_types_mapper)
     # return df.astype(meta.dtypes, copy=False)
 
 
