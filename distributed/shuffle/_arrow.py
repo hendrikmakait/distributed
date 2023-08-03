@@ -52,10 +52,6 @@ def convert_partition(data: bytes, meta: pd.DataFrame) -> pd.DataFrame:
     file = BytesIO(data)
     end = len(data)
     shards = []
-    while file.tell() < end:
-        sr = pa.RecordBatchStreamReader(file)
-        shards.append(sr.read_all())
-    table = pa.concat_tables(shards, promote=True)
 
     def default_types_mapper(pyarrow_dtype: pa.DataType) -> object:
         # Avoid converting strings from `string[pyarrow]` to `string[python]`
@@ -67,7 +63,12 @@ def convert_partition(data: bytes, meta: pd.DataFrame) -> pd.DataFrame:
             return pd.StringDtype("pyarrow")
         return None
 
-    df = table.to_pandas(types_mapper=default_types_mapper)
+    while file.tell() < end:
+        sr = pa.RecordBatchStreamReader(file)
+        shards.append(sr.read_pandas(types_mapper=default_types_mapper))
+    del data
+    df = pd.concat(shards)
+    del shards
     return df.astype(meta.dtypes, copy=False).copy()
 
 
