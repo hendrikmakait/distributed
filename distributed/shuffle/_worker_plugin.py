@@ -547,10 +547,10 @@ class DataFrameShuffleRun(ShuffleRun[int, "pd.DataFrame"]):
         try:
             data = self._read_from_disk((partition_id,))
 
-            def _() -> pd.DataFrame:
-                return convert_partition(data, meta)  # type: ignore
+            # def _() -> pd.DataFrame:
+            # return convert_partition(data, meta)  # type: ignore
 
-            out = await self.offload(_)
+            out = convert_partition(data, meta)  # await self.offload(_)
         except KeyError:
             out = meta.copy()
         return out
