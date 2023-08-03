@@ -69,7 +69,7 @@ def convert_partition(data: bytes, meta: pd.DataFrame) -> pd.DataFrame:
 
     df = table.to_pandas()
     # return table.to_pandas(self_destruct=True, types_mapper=default_types_mapper)
-    return df.astype(meta.dtypes, copy=False)
+    return df.astype(meta.dtypes)
 
 
 def list_of_buffers_to_table(data: list[bytes]) -> pa.Table:
