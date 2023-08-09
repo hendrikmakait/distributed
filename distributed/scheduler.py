@@ -2748,9 +2748,14 @@ class SchedulerState:
 
         self.queued.remove(ts)
 
-        recommendations: Recs = {}
-        self._propagate_released(ts, recommendations)
-        return recommendations, {}, {}
+        ts.state = "released"
+
+        for dts in ts.dependencies:
+            dts.waiters.discard(ts)
+
+        ts.waiters.clear()
+
+        return {}, {}, {}
 
     def transition_queued_processing(self, key: str, stimulus_id: str) -> RecsMsgs:
         ts = self.tasks[key]
