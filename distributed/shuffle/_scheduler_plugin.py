@@ -134,7 +134,8 @@ class ShuffleSchedulerPlugin(SchedulerPlugin):
 
     async def barrier(self, id: ShuffleId, run_id: int) -> None:
         shuffle = self.active_shuffles[id]
-        assert shuffle.run_id == run_id, f"{run_id=} does not match {shuffle}"
+        if shuffle.run_id != run_id:
+            raise ValueError(f"{run_id=} does not match {shuffle}")
         msg = {"op": "shuffle_inputs_done", "shuffle_id": id, "run_id": run_id}
         await self.scheduler.broadcast(
             msg=msg,

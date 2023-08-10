@@ -224,13 +224,13 @@ class ShuffleRun(Generic[T_partition_id, T_partition_type]):
 
     @abc.abstractmethod
     async def add_partition(
-        self, data: T_partition_type, partition_id: T_partition_id
+        self, data: T_partition_type, partition_id: T_partition_id, **kwargs: Any
     ) -> int:
         """Add an input partition to the shuffle run"""
 
     @abc.abstractmethod
     async def get_output_partition(
-        self, partition_id: T_partition_id, key: str, meta: pd.DataFrame | None = None
+        self, partition_id: T_partition_id, key: str, **kwargs: Any
     ) -> T_partition_type:
         """Get an output partition to the shuffle run"""
 
@@ -348,7 +348,9 @@ class ArrayRechunkRun(ShuffleRun[NDIndex, "np.ndarray"]):
                 repartitioned[id].append(shard)
         return {k: pickle.dumps(v) for k, v in repartitioned.items()}
 
-    async def add_partition(self, data: np.ndarray, partition_id: NDIndex) -> int:
+    async def add_partition(
+        self, data: np.ndarray, partition_id: NDIndex, **kwargs: Any
+    ) -> int:
         self.raise_if_closed()
         if self.transferred:
             raise RuntimeError(f"Cannot add more partitions to {self}")
@@ -386,22 +388,16 @@ class ArrayRechunkRun(ShuffleRun[NDIndex, "np.ndarray"]):
         return self.run_id
 
     async def get_output_partition(
-        self, partition_id: NDIndex, key: str, meta: pd.DataFrame | None = None
+        self, partition_id: NDIndex, key: str, **kwargs: Any
     ) -> np.ndarray:
         self.raise_if_closed()
-        assert meta is None
-        assert self.transferred, "`get_output_partition` called before barrier task"
+        if not self.transferred:
+            raise RuntimeError("`get_output_partition` called before barrier task")
 
         await self._ensure_output_worker(partition_id, key)
-
         await self.flush_receive()
-
         data = self._read_from_disk(partition_id)
-
-        def _() -> np.ndarray:
-            return convert_chunk(data)
-
-        return await self.offload(_)
+        return await self.offload(convert_chunk, data)
 
     def _get_assigned_worker(self, id: NDIndex) -> str:
         return self.worker_for[id]
@@ -516,7 +512,12 @@ class DataFrameShuffleRun(ShuffleRun[int, "pd.DataFrame"]):
         del data
         return {(k,): serialize_table(v) for k, v in groups.items()}
 
-    async def add_partition(self, data: pd.DataFrame, partition_id: int) -> int:
+    async def add_partition(
+        self,
+        data: pd.DataFrame,
+        partition_id: int,
+        **kwargs: Any,
+    ) -> int:
         self.raise_if_closed()
         if self.transferred:
             raise RuntimeError(f"Cannot add more partitions to {self}")
@@ -535,11 +536,17 @@ class DataFrameShuffleRun(ShuffleRun[int, "pd.DataFrame"]):
         return self.run_id
 
     async def get_output_partition(
-        self, partition_id: int, key: str, meta: pd.DataFrame | None = None
+        self,
+        partition_id: int,
+        key: str,
+        meta: pd.DataFrame | None = None,
+        **kwargs: Any,
     ) -> pd.DataFrame:
         self.raise_if_closed()
-        assert meta is not None
-        assert self.transferred, "`get_output_partition` called before barrier task"
+        if meta is None:
+            raise ValueError("Excepted meta keyword argument")
+        if not self.transferred:
+            raise RuntimeError("`get_output_partition` called before barrier task")
 
         await self._ensure_output_worker(partition_id, key)
 
@@ -547,10 +554,7 @@ class DataFrameShuffleRun(ShuffleRun[int, "pd.DataFrame"]):
         try:
             data = self._read_from_disk((partition_id,))
 
-            def _() -> pd.DataFrame:
-                return convert_partition(data, meta)  # type: ignore
-
-            out = await self.offload(_)
+            out = await self.offload(convert_partition, data, meta)
         except KeyError:
             out = meta.copy()
         return out
@@ -682,7 +686,8 @@ class ShuffleWorkerPlugin(WorkerPlugin):
         """
         run_id = run_ids[0]
         # Assert that all input data has been shuffled using the same run_id
-        assert all(run_id == id for id in run_ids)
+        if any(run_id != id for id in run_ids):
+            raise RuntimeError(f"Expected all run IDs to match: {run_ids=}")
         # Tell all peers that we've reached the barrier
         # Note that this will call `shuffle_inputs_done` on our own worker as well
         shuffle = await self._get_shuffle_run(shuffle_id, run_id)
