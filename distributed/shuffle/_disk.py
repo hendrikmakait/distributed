@@ -68,9 +68,7 @@ class DiskShardsBuffer(ShardsBuffer):
         with log_errors():
             # Consider boosting total_size a bit here to account for duplication
             with self.time("write"):
-                with open(
-                    self.directory / str(id), mode="ab", buffering=100_000_000
-                ) as f:
+                with open(self.directory / str(id), mode="ab") as f:
                     for shard in shards:
                         f.write(shard)
 
@@ -82,9 +80,7 @@ class DiskShardsBuffer(ShardsBuffer):
 
         try:
             with self.time("read"):
-                with open(
-                    self.directory / str(id), mode="rb", buffering=100_000_000
-                ) as f:
+                with open(self.directory / str(id), mode="rb") as f:
                     data = f.read()
                     size = f.tell()
         except FileNotFoundError:
