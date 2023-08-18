@@ -51,6 +51,7 @@ class ShuffleRun(Generic[_T_partition_id, _T_partition_type]):
         scheduler: PooledRPCCall,
         memory_limiter_disk: ResourceLimiter,
         memory_limiter_comms: ResourceLimiter,
+        read,
     ):
         self.id = id
         self.run_id = run_id
@@ -63,6 +64,7 @@ class ShuffleRun(Generic[_T_partition_id, _T_partition_type]):
         self._disk_buffer = DiskShardsBuffer(
             directory=directory,
             memory_limiter=memory_limiter_disk,
+            read=read,
         )
 
         self._comm_buffer = CommShardsBuffer(
@@ -180,9 +182,11 @@ class ShuffleRun(Generic[_T_partition_id, _T_partition_type]):
         if not self.closed:
             self._exception = exception
 
-    def _read_from_disk(self, id: NDIndex) -> bytes:
+    def _read_from_disk(self, id: NDIndex, *args, **kwargs) -> bytes:
         self.raise_if_closed()
-        data: bytes = self._disk_buffer.read("_".join(str(i) for i in id))
+        data: bytes = self._disk_buffer.read(
+            "_".join(str(i) for i in id), *args, **kwargs
+        )
         return data
 
     async def receive(self, data: list[tuple[_T_partition_id, bytes]]) -> None:

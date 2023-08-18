@@ -1098,7 +1098,8 @@ def test_processing_chain():
     out = {}
     for k, bio in filesystem.items():
         bio.seek(0)
-        out[k] = convert_partition(bio.read(), df.head(0))
+        data, size = convert_partition(bio, df.head(0))
+        out[k] = data
 
     shuffled_df = pd.concat(df for df in out.values())
     pd.testing.assert_frame_equal(

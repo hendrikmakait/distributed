@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from io import BytesIO
+from io import BufferedReader, BytesIO
 from typing import TYPE_CHECKING
 
 from packaging.version import parse
@@ -8,6 +8,8 @@ from packaging.version import parse
 if TYPE_CHECKING:
     import pandas as pd
     import pyarrow as pa
+
+import io
 
 
 def check_dtype_support(meta_input: pd.DataFrame) -> None:
@@ -45,21 +47,26 @@ def check_minimal_arrow_version() -> None:
         )
 
 
-def convert_partition(data: bytes, meta: pd.DataFrame) -> pd.DataFrame:
+def convert_partition(file: BufferedReader, meta: pd.DataFrame) -> pd.DataFrame:
     import pyarrow as pa
 
     from dask.dataframe.dispatch import from_pyarrow_table_dispatch
 
-    file = BytesIO(data)
-    end = len(data)
+    pos = file.tell()
+    file.seek(0, io.SEEK_END)
+    end = file.tell()
+    file.seek(pos)
+
     shards = []
+
+    # Can we simplify this? I/O error or the like?
     while file.tell() < end:
         sr = pa.RecordBatchStreamReader(file)
         shards.append(sr.read_all())
     table = pa.concat_tables(shards, promote=True)
 
     df = from_pyarrow_table_dispatch(meta, table, self_destruct=True)
-    return df.astype(meta.dtypes, copy=False)
+    return df.astype(meta.dtypes, copy=False), file.tell()
 
 
 def list_of_buffers_to_table(data: list[bytes]) -> pa.Table:

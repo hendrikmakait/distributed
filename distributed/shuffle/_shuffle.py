@@ -405,6 +405,7 @@ class DataFrameShuffleRun(ShuffleRun[int, "pd.DataFrame"]):
             scheduler=scheduler,
             memory_limiter_comms=memory_limiter_comms,
             memory_limiter_disk=memory_limiter_disk,
+            read=convert_partition,
         )
         self.column = column
         partitions_of = defaultdict(list)
@@ -483,9 +484,9 @@ class DataFrameShuffleRun(ShuffleRun[int, "pd.DataFrame"]):
 
         await self.flush_receive()
         try:
-            data = self._read_from_disk((partition_id,))
+            # out = self._read_from_disk((partition_id,))
 
-            out = await self.offload(convert_partition, data, meta)
+            out = await self.offload(self._read_from_disk, (partition_id,), meta)
         except KeyError:
             out = meta.copy()
         return out

@@ -41,6 +41,7 @@ class DiskShardsBuffer(ShardsBuffer):
     def __init__(
         self,
         directory: str | pathlib.Path,
+        read,
         memory_limiter: ResourceLimiter | None = None,
     ):
         super().__init__(
@@ -50,6 +51,7 @@ class DiskShardsBuffer(ShardsBuffer):
         )
         self.directory = pathlib.Path(directory)
         self.directory.mkdir(exist_ok=True)
+        self._read = read
 
     async def _process(self, id: str, shards: list[bytes]) -> None:
         """Write one buffer to file
@@ -74,7 +76,7 @@ class DiskShardsBuffer(ShardsBuffer):
                     for shard in shards:
                         f.write(shard)
 
-    def read(self, id: int | str) -> bytes:
+    def read(self, id: int | str, *args, **kwargs) -> bytes:
         """Read a complete file back into memory"""
         self.raise_on_exception()
         if not self._inputs_done:
@@ -85,12 +87,13 @@ class DiskShardsBuffer(ShardsBuffer):
                 with open(
                     self.directory / str(id), mode="rb", buffering=100_000_000
                 ) as f:
-                    data = f.read()
-                    size = f.tell()
+                    data, size = self._read(f, *args, **kwargs)
         except FileNotFoundError:
             raise KeyError(id)
+        except Exception as e:
+            raise
 
-        if data:
+        if data is not None:
             self.bytes_read += size
             return data
         else:
