@@ -30,6 +30,7 @@ from distributed.compatibility import asyncio_run
 from distributed.config import get_loop_factory
 from distributed.metrics import time
 from distributed.protocol import Serialized, deserialize, serialize, to_serialize
+from distributed.protocol.serialize import ToPickle
 from distributed.utils import get_ip, get_ipv6, get_mp_context, wait_for
 from distributed.utils_test import (
     gen_test,
@@ -1118,6 +1119,7 @@ async def check_deserialize(addr):
         "x": b"abc",
         "to_ser": [to_serialize(123)],
         "ser": Serialized(*serialize(456)),
+        "to_pickle": ToPickle(234),
     }
     msg_orig = msg.copy()
 
@@ -1126,9 +1128,11 @@ async def check_deserialize(addr):
         out_value = out_value.copy()  # in case transport passed the object as-is
         to_ser = out_value.pop("to_ser")
         ser = out_value.pop("ser")
+        to_pickle = out_value.pop("to_pickle")
         expected_msg = msg_orig.copy()
         del expected_msg["ser"]
         del expected_msg["to_ser"]
+        del expected_msg["to_pickle"]
         assert out_value == expected_msg
 
         assert isinstance(ser, Serialized)
@@ -1143,11 +1147,15 @@ async def check_deserialize(addr):
         else:
             assert to_ser == to_serialize(123)
 
+        assert to_pickle == 234
+
     def check_out_true(out_value):
         # Check output with deserialize=True
         expected_msg = msg.copy()
         expected_msg["ser"] = 456
         expected_msg["to_ser"] = [123]
+        # expected_msg["pkl"] = 567
+        expected_msg["to_pickle"] = 234
         # Notice, we allow "to_ser" to be a tuple or a list
         assert list(out_value.pop("to_ser")) == expected_msg.pop("to_ser")
         assert out_value == expected_msg
@@ -1169,6 +1177,7 @@ async def check_deserialize(addr):
         "x": _uncompressible,
         "to_ser": (to_serialize(_uncompressible),),
         "ser": Serialized(*serialize(_uncompressible)),
+        "to_pickle": ToPickle(_uncompressible),
     }
     msg_orig = msg.copy()
 
@@ -1178,9 +1187,11 @@ async def check_deserialize(addr):
         out_value = out_value.copy()  # in case transport passed the object as-is
         to_ser = out_value.pop("to_ser")
         ser = out_value.pop("ser")
+        to_pickle = out_value.pop("to_pickle")
         expected_msg = msg_orig.copy()
         del expected_msg["ser"]
         del expected_msg["to_ser"]
+        del expected_msg["to_pickle"]
         assert out_value == expected_msg
 
         if deserialize_flag:
@@ -1197,6 +1208,7 @@ async def check_deserialize(addr):
                 assert deserialize(to_ser.header, to_ser.frames) == _uncompressible
             else:
                 assert to_ser == to_serialize(_uncompressible)
+            assert to_pickle == _uncompressible
 
     await check_listener_deserialize(addr, False, msg, partial(check_out, False))
     await check_connector_deserialize(addr, False, msg, partial(check_out, False))
@@ -1228,6 +1240,7 @@ async def check_deserialize_roundtrip(addr):
         "x": _uncompressible,
         "to_ser": [to_serialize(_uncompressible)],
         "ser": Serialized(*serialize(_uncompressible)),
+        "to_pickle": ToPickle(_uncompressible),
     }
 
     for should_deserialize in (True, False):
@@ -1246,6 +1259,8 @@ async def check_deserialize_roundtrip(addr):
         else:
             assert isinstance(got["to_ser"][0], (to_serialize, Serialized))
             assert isinstance(got["ser"], Serialized)
+
+        assert isinstance(got["to_pickle"], (bytes, bytearray))
 
 
 @gen_test()
