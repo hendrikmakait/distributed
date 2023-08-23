@@ -52,13 +52,19 @@ def convert_partition(data: bytes, meta: pd.DataFrame) -> pd.DataFrame:
 
     file = BytesIO(data)
     end = len(data)
-    shards = []
+
+    dtypes = dict(meta.dtypes)
+    if "_partitions" in dtypes:
+        dtypes["_partitions"] = "int64"
+    meta = meta.astype(dtypes, copy=True)
+    shards = [pa.Schema.from_pandas(meta).empty_table()]
     while file.tell() < end:
         sr = pa.RecordBatchStreamReader(file)
         shards.append(sr.read_all())
     table = pa.concat_tables(shards, promote=True)
 
     df = from_pyarrow_table_dispatch(meta, table, self_destruct=True)
+
     return df.astype(meta.dtypes, copy=False)
 
 

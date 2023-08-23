@@ -284,7 +284,9 @@ def split_by_worker(
     from dask.dataframe.dispatch import to_pyarrow_table_dispatch
 
     dtypes = dict(meta.dtypes)
-    dtypes.pop(column)
+    if column == "_partitions":
+        dtypes[column] = "int64"
+    # dtypes.pop(column)
     df = df.astype(dtypes, copy=False)
 
     # (cudf support) Avoid pd.Series
@@ -304,6 +306,7 @@ def split_by_worker(
     # FIXME: If we do not preserve the index something is corrupting the
     # bytestream such that it cannot be deserialized anymore
     t = to_pyarrow_table_dispatch(df, preserve_index=True)
+    t = t.replace_schema_metadata()
     t = t.sort_by("_worker")
     codes = np.asarray(t["_worker"])
     t = t.drop(["_worker"])
