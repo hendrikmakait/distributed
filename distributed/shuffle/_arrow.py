@@ -63,7 +63,7 @@ def convert_partition(file: BufferedReader, meta: pd.DataFrame) -> pd.DataFrame:
     while file.tell() < end:
         sr = pa.RecordBatchStreamReader(file)
         shards.append(sr.read_all())
-    table = pa.concat_tables(shards, promote=True)
+    table = pa.concat_tables(shards, promote=True).combine_chunks()
 
     df = from_pyarrow_table_dispatch(meta, table, self_destruct=True)
     return df.astype(meta.dtypes, copy=False), file.tell()
