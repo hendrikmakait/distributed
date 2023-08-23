@@ -63,9 +63,10 @@ def convert_partition(data: bytes, meta: pd.DataFrame) -> pd.DataFrame:
         shards.append(sr.read_all())
     table = pa.concat_tables(shards, promote=True)
 
-    df = from_pyarrow_table_dispatch(meta, table, self_destruct=True)
+    return table
+    # df = from_pyarrow_table_dispatch(meta, table, self_destruct=True)
 
-    return df.astype(meta.dtypes, copy=False)
+    # return df.astype(meta.dtypes, copy=False)
 
 
 def list_of_buffers_to_table(data: list[bytes]) -> pa.Table:
