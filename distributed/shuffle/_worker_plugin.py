@@ -104,11 +104,10 @@ class ShuffleWorkerPlugin(WorkerPlugin):
             await shuffle.inputs_done()
 
     async def _close_shuffle_run(self, shuffle: ShuffleRun) -> None:
-        pass
-        # await shuffle.close()
-        # async with self._runs_cleanup_condition:
-        #     self._runs.remove(shuffle)
-        #     self._runs_cleanup_condition.notify_all()
+        await shuffle.close()
+        async with self._runs_cleanup_condition:
+            self._runs.remove(shuffle)
+            self._runs_cleanup_condition.notify_all()
 
     def shuffle_fail(self, shuffle_id: ShuffleId, run_id: int, message: str) -> None:
         """Fails the shuffle run with the message as exception and triggers cleanup.

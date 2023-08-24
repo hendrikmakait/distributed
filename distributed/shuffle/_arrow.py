@@ -50,12 +50,17 @@ def convert_partition(data: bytes, meta: pd.DataFrame) -> pd.DataFrame:
 
     from dask.dataframe.dispatch import from_pyarrow_table_dispatch
 
-    file = BytesIO(data)
-    end = len(data)
+    # file = BytesIO(data)
+    # end = len(data)
     shards = []
-    while file.tell() < end:
-        sr = pa.RecordBatchStreamReader(file)
-        shards.append(sr.read_all())
+    # while file.tell() < end:
+    with data as f:
+        while True:
+            try:
+                sr = pa.RecordBatchStreamReader(f)
+                shards.append(sr.read_all())
+            except:
+                break
     table = pa.concat_tables(shards, promote=True).combine_chunks()
 
     df = from_pyarrow_table_dispatch(meta, table, self_destruct=True)
