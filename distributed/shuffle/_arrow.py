@@ -53,16 +53,23 @@ def convert_partition(data: bytes, meta: pd.DataFrame) -> pd.DataFrame:
     # file = BytesIO(data)
     # end = len(data)
     shards = []
-    # while file.tell() < end:
+
+    prev = None
     with data as f:
         while True:
             try:
                 sr = pa.RecordBatchStreamReader(f)
-                shards.append(sr.read_all())
+                shard = sr.read_all()
+                if prev is None:
+                    prev = shard
+                else:
+                    shards.append(pa.concat_tables([prev, shard]).combine_chunks())
+                    prev = None
             except:
                 break
-    table = pa.concat_tables(shards, promote=True).combine_chunks()
-
+    if prev is not None:
+        shards.append(prev)
+    table = pa.concat_tables(shards, promote=True)
     df = from_pyarrow_table_dispatch(meta, table, self_destruct=True)
     return df.astype(meta.dtypes, copy=False)
 
