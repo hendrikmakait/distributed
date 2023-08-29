@@ -80,11 +80,13 @@ class DiskShardsBuffer(ShardsBuffer):
         if not self._inputs_done:
             raise RuntimeError("Tried to read from file before done.")
 
-        with self.time("read"):
-            import pyarrow as pa
-            return pa.OSFile(
-                str(self.directory / str(id)), mode="rb"
-            )
+        try:
+            with self.time("read"):
+                import pyarrow as pa
+
+                return pa.OSFile(str(self.directory / str(id)), mode="rb")
+        except FileNotFoundError:
+            raise KeyError(id)
 
     async def close(self) -> None:
         await super().close()

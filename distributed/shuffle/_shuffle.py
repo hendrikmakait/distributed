@@ -484,10 +484,12 @@ class DataFrameShuffleRun(ShuffleRun[int, "pd.DataFrame"]):
         await self.flush_receive()
         try:
             data = self._read_from_disk((partition_id,))
-            if data.seek(0, whence=-1) == 0:
-                raise FileNotFoundError()
+            pos = data.tell()
+            if data.seek(0, whence=2) == 0:
+                raise KeyError(partition_id)
+            data.seek(pos)
             out = await self.offload(convert_partition, data, meta)
-        except FileNotFoundError:
+        except KeyError:
             out = meta.copy()
         return out
 
