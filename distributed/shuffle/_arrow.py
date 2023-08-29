@@ -60,7 +60,6 @@ def convert_partition(data: bytes, meta: pd.DataFrame) -> pd.DataFrame:
                 sr = pa.RecordBatchStreamReader(f)
                 prevs.append(sr.read_all())
                 if len(prevs) == 3:
-                else:
                     shards.append(pa.concat_tables(prevs).combine_chunks())
                     prevs = []
             except:
