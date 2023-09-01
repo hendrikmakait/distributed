@@ -78,16 +78,15 @@ def read_from_disk(path: Path, meta: pd.DataFrame) -> tuple[list[pa.Table], int]
 
     shards = []
     with pa.OSFile(str(path), mode="rb") as f:
-        while True:
-            try:
-                sr = pa.RecordBatchStreamReader(f)
-                shard = sr.read_all()
-                arrs = [pa.concat_arrays(column.chunks) for column in shard.columns]
-                shard = pa.table(data=arrs, schema=shard.schema)
-                shards.append(shard)
-            # TODO: Figure out when to stop
-            except Exception:
-                break
+        pos = f.tell()
+        end = f.seek(0, whence=2)
+        f.seek(pos)
+        while f.tell() < end:
+            sr = pa.RecordBatchStreamReader(f)
+            shard = sr.read_all()
+            arrs = [pa.concat_arrays(column.chunks) for column in shard.columns]
+            shard = pa.table(data=arrs, schema=shard.schema)
+            shards.append(shard)
         size = f.tell()
     return shards, size
 
