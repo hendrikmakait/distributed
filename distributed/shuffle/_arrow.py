@@ -77,8 +77,10 @@ def read_from_disk(path: Path, meta: pd.DataFrame) -> tuple[list[pa.Table], int]
     import pyarrow as pa
 
     shards = []
-    with pa.OSFile(str(path), mode="rb") as f:
-        end = f.seek(0, whence=2)
+    # with pa.OSFile(str(path), mode="rb") as f:
+    with path.open(mode="rb") as f:
+        end = f.seek(0, 2)
+        # end = f.seek(0, whence=2)
         f.seek(0)
         while f.tell() < end:
             sr = pa.RecordBatchStreamReader(f)
