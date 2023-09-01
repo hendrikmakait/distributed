@@ -76,7 +76,6 @@ def convert_partition(data: bytes, meta: pd.DataFrame) -> pd.DataFrame:
 def read_from_disk(path: Path, meta: pd.DataFrame) -> tuple[list[pa.Table], int]:
     import pyarrow as pa
 
-    schema = pa.Schema.from_pandas(meta)
     shards = []
     with pa.OSFile(str(path), mode="rb") as f:
         while True:
@@ -84,7 +83,7 @@ def read_from_disk(path: Path, meta: pd.DataFrame) -> tuple[list[pa.Table], int]
                 sr = pa.RecordBatchStreamReader(f)
                 shard = sr.read_all()
                 arrs = [pa.concat_arrays(column.chunks) for column in shard.columns]
-                shard = pa.table(data=arrs, schema=schema)
+                shard = pa.table(data=arrs, schema=shard.schema)
                 shards.append(shard)
             # TODO: Figure out when to stop
             except Exception:
