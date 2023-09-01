@@ -83,11 +83,11 @@ class DiskShardsBuffer(ShardsBuffer):
         if not self._inputs_done:
             raise RuntimeError("Tried to read from file before done.")
 
-        try:
-            with self.time("read"):
-                data, size = self._read(self.directory / str(id))
-        except FileNotFoundError:
-            raise KeyError(id)
+        # try:
+        with self.time("read"):
+            data, size = self._read(self.directory / str(id))
+        # except FileNotFoundError:
+        # raise KeyError(id)
 
         if data:
             self.bytes_read += size
