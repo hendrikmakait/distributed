@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from packaging.version import parse
@@ -45,6 +46,16 @@ def check_minimal_arrow_version() -> None:
         )
 
 
+def convert_shards(shards: list[pa.Table], meta: pd.DataFrame) -> pd.DataFrame:
+    import pyarrow as pa
+
+    from dask.dataframe.dispatch import from_pyarrow_table_dispatch
+
+    table = pa.concat_tables(shards, promote=True)
+    df = from_pyarrow_table_dispatch(meta, table, self_destruct=True)
+    return df.astype(meta.dtypes, copy=False)
+
+
 def convert_partition(data: bytes, meta: pd.DataFrame) -> pd.DataFrame:
     import pyarrow as pa
 
@@ -60,6 +71,24 @@ def convert_partition(data: bytes, meta: pd.DataFrame) -> pd.DataFrame:
 
     df = from_pyarrow_table_dispatch(meta, table, self_destruct=True)
     return df.astype(meta.dtypes, copy=False)
+
+
+def read_from_disk(path: Path, meta: pd.DataFrame) -> tuple[list[pa.Table], int]:
+    import pyarrow as pa
+
+    shards = []
+    with pa.OSFile(str(path), mode="rb") as f:
+        while True:
+            try:
+                sr = pa.RecordBatchStreamReader(f)
+                shard = sr.read_all()
+                # TODO: Force copy here
+                shards.append(shard)
+            # TODO: Figure out when to stop
+            except Exception:
+                break
+        size = f.tell()
+    return shards, size
 
 
 def list_of_buffers_to_table(data: list[bytes]) -> pa.Table:

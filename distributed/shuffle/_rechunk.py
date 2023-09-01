@@ -102,8 +102,8 @@ from collections import defaultdict
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from io import BytesIO
 from itertools import product
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import dask
@@ -263,26 +263,24 @@ def split_axes(old: ChunkedAxes, new: ChunkedAxes) -> SplitAxes:
     return axes
 
 
-def convert_chunk(data: bytes) -> np.ndarray:
+def convert_chunk(shards: list[tuple[NDIndex, np.ndarray]]) -> np.ndarray:
     import numpy as np
 
     from dask.array.core import concatenate3
 
-    file = BytesIO(data)
-    shards: dict[NDIndex, np.ndarray] = {}
+    indexed: dict[NDIndex, np.ndarray] = {}
 
-    while file.tell() < len(data):
-        for index, shard in pickle.load(file):
-            shards[index] = shard
+    for index, shard in shards:
+        indexed[index] = shard
+    del shards
 
-    subshape = [max(dim) + 1 for dim in zip(*shards.keys())]
-    assert len(shards) == np.prod(subshape)
+    subshape = [max(dim) + 1 for dim in zip(*indexed.keys())]
+    assert len(indexed) == np.prod(subshape)
 
     rec_cat_arg = np.empty(subshape, dtype="O")
-    for index, shard in shards.items():
+    for index, shard in indexed.items():
         rec_cat_arg[tuple(index)] = shard
-    del data
-    del file
+    del indexed
     arrs = rec_cat_arg.tolist()
     return concatenate3(arrs)
 
@@ -447,6 +445,18 @@ class ArrayRechunkRun(ShuffleRun[NDIndex, "np.ndarray"]):
 
     def _get_assigned_worker(self, id: NDIndex) -> str:
         return self.worker_for[id]
+
+    def read(self, path: Path) -> tuple[Any, int]:
+        shards: list[tuple[NDIndex, np.ndarray]] = []
+        with path.open(mode="rb") as f:
+            try:
+                while True:
+                    shards.append(pickle.load(f))
+            # TODO: When to stop?
+            except Exception:
+                pass
+            size = f.tell()
+        return shards, size
 
 
 @dataclass(frozen=True)

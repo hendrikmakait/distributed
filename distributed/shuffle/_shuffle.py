@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Union
 
 import toolz
@@ -20,8 +21,9 @@ from distributed.exceptions import Reschedule
 from distributed.shuffle._arrow import (
     check_dtype_support,
     check_minimal_arrow_version,
-    convert_partition,
+    convert_shards,
     list_of_buffers_to_table,
+    read_from_disk,
     serialize_table,
 )
 from distributed.shuffle._core import (
@@ -491,15 +493,21 @@ class DataFrameShuffleRun(ShuffleRun[int, "pd.DataFrame"]):
 
         await self.flush_receive()
         try:
-            data = self._read_from_disk((partition_id,))
 
-            out = await self.offload(convert_partition, data, self.meta)
+            def _(partition_id: int, meta: pd.DataFrame) -> pd.DataFrame:
+                shards = self._read_from_disk((partition_id,))
+                return convert_shards(shards, meta)
+
+            out = await self.offload(_, partition_id, self.meta)
         except KeyError:
             out = self.meta.copy()
         return out
 
     def _get_assigned_worker(self, id: int) -> str:
         return self.worker_for[id]
+
+    def read(self, path: Path) -> tuple[Any, int]:
+        return read_from_disk(path, self.meta)
 
 
 @dataclass(frozen=True)

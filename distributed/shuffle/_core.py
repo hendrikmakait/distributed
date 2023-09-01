@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import partial
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Generic, NewType, TypeVar
 
 from distributed.core import PooledRPCCall
@@ -63,6 +64,7 @@ class ShuffleRun(Generic[_T_partition_id, _T_partition_type]):
         self._disk_buffer = DiskShardsBuffer(
             directory=directory,
             memory_limiter=memory_limiter_disk,
+            read=self.read,
         )
 
         self._comm_buffer = CommShardsBuffer(
@@ -110,6 +112,10 @@ class ShuffleRun(Generic[_T_partition_id, _T_partition_type]):
             shuffle_id=self.id,
             run_id=self.run_id,
         )
+
+    @abc.abstractmethod
+    def read(self, path: Path) -> tuple[Any, int]:
+        "Read data from path"
 
     async def offload(self, func: Callable[..., _T], *args: Any) -> _T:
         self.raise_if_closed()
@@ -180,10 +186,9 @@ class ShuffleRun(Generic[_T_partition_id, _T_partition_type]):
         if not self.closed:
             self._exception = exception
 
-    def _read_from_disk(self, id: NDIndex) -> bytes:
+    def _read_from_disk(self, id: NDIndex) -> list[Any]:
         self.raise_if_closed()
-        data: bytes = self._disk_buffer.read("_".join(str(i) for i in id))
-        return data
+        return self._disk_buffer.read("_".join(str(i) for i in id))
 
     async def receive(self, data: list[tuple[_T_partition_id, bytes]]) -> None:
         await self._receive(data)
