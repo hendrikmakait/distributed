@@ -66,7 +66,7 @@ class ShuffleSchedulerPlugin(SchedulerPlugin):
     async def start(self, scheduler: Scheduler) -> None:
         worker_plugin = ShuffleWorkerPlugin()
         await self.scheduler.register_worker_plugin(
-            None, dumps(worker_plugin), name="shuffle"
+            dumps(worker_plugin), name="shuffle"
         )
 
     def shuffle_ids(self) -> set[ShuffleId]:
@@ -289,7 +289,7 @@ class ShuffleSchedulerPlugin(SchedulerPlugin):
         """Clean up scheduler and worker state once a shuffle becomes inactive."""
         if finish not in ("released", "forgotten"):
             return
-        if not key.startswith("shuffle-barrier-"):
+        if not isinstance(key, str) or not key.startswith("shuffle-barrier-"):
             return
         shuffle_id = id_from_key(key)
 

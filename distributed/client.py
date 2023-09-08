@@ -21,18 +21,18 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures._base import DoneAndNotDoneFutures
 from contextlib import asynccontextmanager, contextmanager, suppress
 from contextvars import ContextVar
-from functools import partial
+from functools import partial, singledispatchmethod
 from importlib.metadata import PackageNotFoundError, version
 from numbers import Number
 from queue import Queue as pyQueue
-from typing import Any, ClassVar, Literal, NamedTuple, TypedDict
+from typing import Any, Callable, ClassVar, Literal, NamedTuple, TypedDict, cast
 
 from packaging.version import parse as parse_version
-from tlz import first, groupby, keymap, merge, partition_all, valmap
+from tlz import first, groupby, merge, partition_all, valmap
 
 import dask
 from dask.base import collections_to_dsk, normalize_token, tokenize
-from dask.core import flatten
+from dask.core import flatten, validate_key
 from dask.highlevelgraph import HighLevelGraph
 from dask.optimization import SubgraphCallable
 from dask.utils import (
@@ -41,12 +41,12 @@ from dask.utils import (
     format_bytes,
     funcname,
     parse_timedelta,
-    stringify,
+    shorten_traceback,
     typename,
 )
 from dask.widgets import get_template
 
-from distributed.core import ErrorMessage
+from distributed.core import ErrorMessage, OKMessage
 from distributed.protocol.serialize import _is_dumpable
 from distributed.utils import Deadline, wait_for
 
@@ -75,6 +75,7 @@ from distributed.core import (
 from distributed.diagnostics.plugin import (
     ForwardLoggingPlugin,
     NannyPlugin,
+    SchedulerPlugin,
     SchedulerUploadFile,
     UploadFile,
     WorkerPlugin,
@@ -211,7 +212,6 @@ class Future(WrappedKey):
     def __init__(self, key, client=None, inform=True, state=None):
         self.key = key
         self._cleared = False
-        self._tkey = stringify(key)
         self._client = client
         self._input_state = state
         self._inform = inform
@@ -231,19 +231,19 @@ class Future(WrappedKey):
                 client = None
             self._client = client
         if self._client and not self._state:
-            self._client._inc_ref(self._tkey)
+            self._client._inc_ref(self.key)
             self._generation = self._client.generation
 
-            if self._tkey in self._client.futures:
-                self._state = self._client.futures[self._tkey]
+            if self.key in self._client.futures:
+                self._state = self._client.futures[self.key]
             else:
-                self._state = self._client.futures[self._tkey] = FutureState()
+                self._state = self._client.futures[self.key] = FutureState()
 
             if self._inform:
                 self._client._send_to_scheduler(
                     {
                         "op": "client-desires-keys",
-                        "keys": [self._tkey],
+                        "keys": [self.key],
                         "client": self._client.id,
                     }
                 )
@@ -317,18 +317,8 @@ class Future(WrappedKey):
             The result of the computation. Or a coroutine if the client is asynchronous.
         """
         self._verify_initialized()
-        if self.client.asynchronous:
+        with shorten_traceback():
             return self.client.sync(self._result, callback_timeout=timeout)
-
-        # shorten error traceback
-        result = self.client.sync(self._result, callback_timeout=timeout, raiseit=False)
-        if self.status == "error":
-            typ, exc, tb = result
-            raise exc.with_traceback(tb)
-        elif self.status == "cancelled":
-            raise result
-        else:
-            return result
 
     async def _result(self, raiseit=True):
         await self._state.wait()
@@ -503,7 +493,7 @@ class Future(WrappedKey):
         if not self._cleared and self.client.generation == self._generation:
             self._cleared = True
             try:
-                self.client.loop.add_callback(self.client._dec_ref, stringify(self.key))
+                self.client.loop.add_callback(self.client._dec_ref, self.key)
             except TypeError:  # pragma: no cover
                 pass  # Shutting down, add_callback may be None
 
@@ -1963,10 +1953,8 @@ class Client(SyncMethodMixin):
             else:
                 key = funcname(func) + "-" + str(uuid.uuid4())
 
-        skey = stringify(key)
-
         with self._refcount_lock:
-            if skey in self.futures:
+            if key in self.futures:
                 return Future(key, self, inform=False)
 
         if allow_other_workers and workers is None:
@@ -1976,16 +1964,16 @@ class Client(SyncMethodMixin):
             workers = [workers]
 
         if kwargs:
-            dsk = {skey: (apply, func, list(args), kwargs)}
+            dsk = {key: (apply, func, list(args), kwargs)}
         else:
-            dsk = {skey: (func,) + tuple(args)}
+            dsk = {key: (func,) + tuple(args)}
 
         futures = self._graph_to_futures(
             dsk,
-            [skey],
+            [key],
             workers=workers,
             allow_other_workers=allow_other_workers,
-            internal_priority={skey: 0},
+            internal_priority={key: 0},
             user_priority=priority,
             resources=resources,
             retries=retries,
@@ -1995,7 +1983,7 @@ class Client(SyncMethodMixin):
 
         logger.debug("Submit %s(...), %s", funcname(func), key)
 
-        return futures[skey]
+        return futures[key]
 
     def map(
         self,
@@ -2200,7 +2188,7 @@ class Client(SyncMethodMixin):
         )
         logger.debug("map(%s, ...)", funcname(func))
 
-        return [futures[stringify(k)] for k in keys]
+        return [futures[k] for k in keys]
 
     async def _gather(self, futures, errors="raise", direct=None, local_worker=None):
         unpacked, future_set = unpack_remotedata(futures, byte_keys=True)
@@ -2212,7 +2200,7 @@ class Client(SyncMethodMixin):
                 f"mismatched Futures and their client IDs (this client is {self.id}): "
                 f"{ {f: f.client.id for f in mismatched_futures} }"
             )
-        keys = [stringify(future.key) for future in future_set]
+        keys = [future.key for future in future_set]
         bad_data = dict()
         data = {}
 
@@ -2393,13 +2381,15 @@ class Client(SyncMethodMixin):
                 "Consider using a normal for loop and Client.submit/gather"
             )
 
-        elif isinstance(futures, Iterator):
+        if isinstance(futures, Iterator):
             return (self.gather(f, errors=errors, direct=direct) for f in futures)
-        else:
-            try:
-                local_worker = get_worker()
-            except ValueError:
-                local_worker = None
+
+        try:
+            local_worker = get_worker()
+        except ValueError:
+            local_worker = None
+
+        with shorten_traceback():
             return self.sync(
                 self._gather,
                 futures,
@@ -2423,11 +2413,6 @@ class Client(SyncMethodMixin):
             timeout = self._timeout
         if isinstance(workers, (str, Number)):
             workers = [workers]
-        if isinstance(data, dict) and not all(
-            isinstance(k, (bytes, str)) for k in data
-        ):
-            d = await self._scatter(keymap(stringify, data), workers, broadcast)
-            return {k: d[stringify(k)] for k in data}
 
         if isinstance(data, type(range(0))):
             data = list(data)
@@ -2639,7 +2624,7 @@ class Client(SyncMethodMixin):
 
     async def _cancel(self, futures, force=False):
         # FIXME: This method is asynchronous since interacting with the FutureState below requires an event loop.
-        keys = list({stringify(f.key) for f in futures_of(futures)})
+        keys = list({f.key for f in futures_of(futures)})
         self._send_to_scheduler({"op": "cancel-keys", "keys": keys, "force": force})
         for k in keys:
             st = self.futures.pop(k, None)
@@ -2665,7 +2650,7 @@ class Client(SyncMethodMixin):
         return self.sync(self._cancel, futures, asynchronous=asynchronous, force=force)
 
     async def _retry(self, futures):
-        keys = list({stringify(f.key) for f in futures_of(futures)})
+        keys = list({f.key for f in futures_of(futures)})
         response = await self.scheduler.retry(keys=keys, client=self.id)
         for key in response:
             st = self.futures[key]
@@ -2689,7 +2674,7 @@ class Client(SyncMethodMixin):
         coroutines = []
 
         def add_coro(name, data):
-            keys = [stringify(f.key) for f in futures_of(data)]
+            keys = [f.key for f in futures_of(data)]
             coroutines.append(
                 self.scheduler.publish_put(
                     keys=keys,
@@ -3148,6 +3133,10 @@ class Client(SyncMethodMixin):
             # Pack the high level graph before sending it to the scheduler
             keyset = set(keys)
 
+            # Validate keys
+            for key in keyset:
+                validate_key(key)
+
             # Create futures before sending graph (helps avoid contention)
             futures = {key: Future(key, self, inform=False) for key in keyset}
             # Circular import
@@ -3171,7 +3160,7 @@ class Client(SyncMethodMixin):
                     "op": "update-graph",
                     "graph_header": header,
                     "graph_frames": frames,
-                    "keys": list(map(stringify, keys)),
+                    "keys": list(keys),
                     "internal_priority": internal_priority,
                     "submitting_task": getattr(thread_state, "key", None),
                     "fifo_timeout": fifo_timeout,
@@ -3297,7 +3286,7 @@ class Client(SyncMethodMixin):
         with self._refcount_lock:
             changed = False
             for key in list(dsk):
-                if stringify(key) in self.futures:
+                if key in self.futures:
                     if not changed:
                         changed = True
                         dsk = ensure_dict(dsk)
@@ -3793,10 +3782,11 @@ class Client(SyncMethodMixin):
 
         async def _():
             results = await asyncio.gather(
-                self.register_scheduler_plugin(
+                self.register_plugin(
                     SchedulerUploadFile(filename, load=load), name=name
                 ),
-                self.register_worker_plugin(UploadFile(filename, load=load), name=name),
+                # FIXME: Make scheduler plugin responsible for (de)registering worker plugin
+                self.register_plugin(UploadFile(filename, load=load), name=name),
             )
             return results[1]  # Results from workers upload
 
@@ -3805,7 +3795,7 @@ class Client(SyncMethodMixin):
     async def _rebalance(self, futures=None, workers=None):
         if futures is not None:
             await _wait(futures)
-            keys = list({stringify(f.key) for f in self.futures_of(futures)})
+            keys = list({f.key for f in self.futures_of(futures)})
         else:
             keys = None
         result = await self.scheduler.rebalance(keys=keys, workers=workers)
@@ -3841,7 +3831,7 @@ class Client(SyncMethodMixin):
     async def _replicate(self, futures, n=None, workers=None, branching_factor=2):
         futures = self.futures_of(futures)
         await _wait(futures)
-        keys = {stringify(f.key) for f in futures}
+        keys = {f.key for f in futures}
         await self.scheduler.replicate(
             keys=list(keys), n=n, workers=workers, branching_factor=branching_factor
         )
@@ -3962,7 +3952,7 @@ class Client(SyncMethodMixin):
         """
         if futures is not None:
             futures = self.futures_of(futures)
-            keys = list(map(stringify, {f.key for f in futures}))
+            keys = list({f.key for f in futures})
         else:
             keys = None
 
@@ -4098,7 +4088,7 @@ class Client(SyncMethodMixin):
         keys = keys or []
         if futures is not None:
             futures = self.futures_of(futures)
-            keys += list(map(stringify, {f.key for f in futures}))
+            keys += list({f.key for f in futures})
         return self.sync(self.scheduler.call_stack, keys=keys or None)
 
     def profile(
@@ -4682,10 +4672,9 @@ class Client(SyncMethodMixin):
             k = (k,)
         for kk in k:
             if dask.is_dask_collection(kk):
-                for kkk in kk.__dask_keys__():
-                    yield stringify(kkk)
+                yield from kk.__dask_keys__()
             else:
-                yield stringify(kk)
+                yield kk
 
     @staticmethod
     def collections_to_dsk(collections, *args, **kwargs):
@@ -4827,15 +4816,90 @@ class Client(SyncMethodMixin):
         else:
             return msgs
 
-    async def _register_scheduler_plugin(self, plugin, name, idempotent=False):
+    def register_plugin(
+        self,
+        plugin: NannyPlugin | SchedulerPlugin | WorkerPlugin,
+        name: str | None = None,
+        idempotent: bool = False,
+    ):
+        """Register a plugin.
+
+        See https://distributed.readthedocs.io/en/latest/plugins.html
+
+        Parameters
+        ----------
+        plugin :
+            A nanny, scheduler, or worker plugin to register.
+        name :
+            Name for the plugin; if None, a name is taken from the
+            plugin instance or automatically generated if not present.
+        idempotent :
+            Do not re-register if a plugin of the given name already exists.
+        """
+        if name is None:
+            name = _get_plugin_name(plugin)
+        assert name
+
+        return self._register_plugin(plugin, name, idempotent)
+
+    @singledispatchmethod
+    def _register_plugin(
+        self,
+        plugin: NannyPlugin | SchedulerPlugin | WorkerPlugin,
+        name: str,
+        idempotent: bool,
+    ):
+        raise TypeError(
+            "Registering duck-typed plugins is not allowed. Please inherit from "
+            "NannyPlugin, WorkerPlugin, or SchedulerPlugin to create a plugin."
+        )
+
+    @_register_plugin.register
+    def _(self, plugin: SchedulerPlugin, name: str, idempotent: bool):
+        return self.sync(
+            self._register_scheduler_plugin,
+            plugin=plugin,
+            name=name,
+            idempotent=idempotent,
+        )
+
+    @_register_plugin.register
+    def _(
+        self, plugin: NannyPlugin, name: str, idempotent: bool
+    ) -> dict[str, OKMessage]:
+        return self.sync(
+            self._register_nanny_plugin,
+            plugin=plugin,
+            name=name,
+            idempotent=idempotent,
+        )
+
+    @_register_plugin.register
+    def _(self, plugin: WorkerPlugin, name: str, idempotent: bool):
+        return self.sync(
+            self._register_worker_plugin,
+            plugin=plugin,
+            name=name,
+            idempotent=idempotent,
+        )
+
+    async def _register_scheduler_plugin(
+        self, plugin: SchedulerPlugin, name: str, idempotent: bool
+    ):
         return await self.scheduler.register_scheduler_plugin(
             plugin=dumps(plugin),
             name=name,
             idempotent=idempotent,
         )
 
-    def register_scheduler_plugin(self, plugin, name=None, idempotent=False):
-        """Register a scheduler plugin.
+    def register_scheduler_plugin(
+        self, plugin: SchedulerPlugin, name: str | None = None, idempotent: bool = False
+    ):
+        """
+        Register a scheduler plugin.
+
+        .. deprecated:: 2023.9.2
+            Use :meth:`Client.register_plugin` instead.
 
         See https://distributed.readthedocs.io/en/latest/plugins.html#scheduler-plugins
 
@@ -4849,15 +4913,13 @@ class Client(SyncMethodMixin):
         idempotent : bool
             Do not re-register if a plugin of the given name already exists.
         """
-        if name is None:
-            name = _get_plugin_name(plugin)
-
-        return self.sync(
-            self._register_scheduler_plugin,
-            plugin=plugin,
-            name=name,
-            idempotent=idempotent,
+        warnings.warn(
+            "`Client.register_scheduler_plugin` has been deprecated; "
+            "please `Client.register_plugin` instead",
+            DeprecationWarning,
+            stacklevel=2,
         )
+        return cast(OKMessage, self.register_plugin(plugin, name, idempotent))
 
     async def _unregister_scheduler_plugin(self, name):
         return await self.scheduler.unregister_scheduler_plugin(name=name)
@@ -4888,7 +4950,7 @@ class Client(SyncMethodMixin):
         ...         pass
 
         >>> plugin = MyPlugin(1, 2, 3)
-        >>> client.register_scheduler_plugin(plugin, name='foo')
+        >>> client.register_plugin(plugin, name='foo')
         >>> client.unregister_scheduler_plugin(name='foo')
 
         See Also
@@ -4915,26 +4977,49 @@ class Client(SyncMethodMixin):
         setup : callable(dask_worker: Worker) -> None
             Function to register and run on all workers
         """
-        return self.register_worker_plugin(_WorkerSetupPlugin(setup))
+        return self.register_plugin(_WorkerSetupPlugin(setup))
 
-    async def _register_worker_plugin(self, plugin=None, name=None, nanny=None):
-        if nanny or nanny is None and isinstance(plugin, NannyPlugin):
-            method = self.scheduler.register_nanny_plugin
-        else:
-            method = self.scheduler.register_worker_plugin
-
-        responses = await method(plugin=dumps(plugin), name=name)
+    async def _register_worker_plugin(
+        self, plugin: WorkerPlugin, name: str, idempotent: bool
+    ) -> dict[str, OKMessage]:
+        responses = await self.scheduler.register_worker_plugin(
+            plugin=dumps(plugin), name=name, idempotent=idempotent
+        )
         for response in responses.values():
             if response["status"] == "error":
                 _, exc, tb = clean_exception(
                     response["exception"], response["traceback"]
                 )
+                assert exc
                 raise exc.with_traceback(tb)
-        return responses
+        return cast(dict[str, OKMessage], responses)
 
-    def register_worker_plugin(self, plugin=None, name=None, nanny=None):
+    async def _register_nanny_plugin(
+        self, plugin: NannyPlugin, name: str, idempotent: bool
+    ) -> dict[str, OKMessage]:
+        responses = await self.scheduler.register_nanny_plugin(
+            plugin=dumps(plugin), name=name, idempotent=idempotent
+        )
+        for response in responses.values():
+            if response["status"] == "error":
+                _, exc, tb = clean_exception(
+                    response["exception"], response["traceback"]
+                )
+                assert exc
+                raise exc.with_traceback(tb)
+        return cast(dict[str, OKMessage], responses)
+
+    def register_worker_plugin(
+        self,
+        plugin: NannyPlugin | WorkerPlugin,
+        name: str | None = None,
+        nanny: bool | None = None,
+    ):
         """
         Registers a lifecycle worker plugin for all current and future workers.
+
+        .. deprecated:: 2023.9.2
+            Use :meth:`Client.register_plugin` instead.
 
         This registers a new object to handle setup, task state transitions and
         teardown for workers in this cluster. The plugin will instantiate
@@ -4981,11 +5066,11 @@ class Client(SyncMethodMixin):
         ...         pass
 
         >>> plugin = MyPlugin(1, 2, 3)
-        >>> client.register_worker_plugin(plugin)
+        >>> client.register_plugin(plugin)
 
         You can get access to the plugin with the ``get_worker`` function
 
-        >>> client.register_worker_plugin(other_plugin, name='my-plugin')
+        >>> client.register_plugin(other_plugin, name='my-plugin')
         >>> def f():
         ...    worker = get_worker()
         ...    plugin = worker.plugins['my-plugin']
@@ -4998,14 +5083,70 @@ class Client(SyncMethodMixin):
         distributed.WorkerPlugin
         unregister_worker_plugin
         """
+        warnings.warn(
+            "`Client.register_worker_plugin` has been deprecated; "
+            "please use `Client.register_plugin` instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if name is None:
             name = _get_plugin_name(plugin)
 
         assert name
 
-        return self.sync(
-            self._register_worker_plugin, plugin=plugin, name=name, nanny=nanny
-        )
+        method: Callable
+        if isinstance(plugin, WorkerPlugin):
+            method = self._register_worker_plugin
+            if nanny is True:
+                warnings.warn(
+                    "Registering a `WorkerPlugin` as a nanny plugin is not "
+                    "allowed, registering as a worker plugin instead. "
+                    "To register as a nanny plugin, inherit from `NannyPlugin`.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+        elif isinstance(plugin, NannyPlugin):
+            method = self._register_nanny_plugin
+            if nanny is False:
+                warnings.warn(
+                    "Registering a `NannyPlugin` as a worker plugin is not "
+                    "allowed, registering as a nanny plugin instead. "
+                    "To register as a worker plugin, inherit from `WorkerPlugin`.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+        elif isinstance(plugin, SchedulerPlugin):  # type: ignore[unreachable]
+            if nanny:
+                warnings.warn(
+                    "Registering a `SchedulerPlugin` as a nanny plugin is not "
+                    "allowed, registering as a scheduler plugin instead. "
+                    "To register as a nanny plugin, inherit from `NannyPlugin`.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            else:
+                warnings.warn(
+                    "Registering a `SchedulerPlugin` as a worker plugin is not "
+                    "allowed, registering as a scheduler plugin instead. "
+                    "To register as a worker plugin, inherit from `WorkerPlugin`.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            method = self._register_scheduler_plugin
+        else:
+            warnings.warn(
+                "Registering duck-typed plugins has been deprecated. "
+                "Please make sure your plugin inherits from `NannyPlugin` "
+                "or `WorkerPlugin`.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if nanny is True:
+                method = self._register_nanny_plugin
+            else:
+                method = self._register_worker_plugin
+
+        return self.sync(method, plugin=plugin, name=name, idempotent=False)
 
     async def _unregister_worker_plugin(self, name, nanny=None):
         if nanny:
@@ -5029,7 +5170,7 @@ class Client(SyncMethodMixin):
         Parameters
         ----------
         name : str
-            Name of the plugin to unregister. See the :meth:`Client.register_worker_plugin`
+            Name of the plugin to unregister. See the :meth:`Client.register_plugin`
             docstring for more information.
 
         Examples
@@ -5047,12 +5188,12 @@ class Client(SyncMethodMixin):
         ...         pass
 
         >>> plugin = MyPlugin(1, 2, 3)
-        >>> client.register_worker_plugin(plugin, name='foo')
+        >>> client.register_plugin(plugin, name='foo')
         >>> client.unregister_worker_plugin(name='foo')
 
         See Also
         --------
-        register_worker_plugin
+        register_plugin
         """
         return self.sync(self._unregister_worker_plugin, name=name, nanny=nanny)
 
@@ -5189,7 +5330,7 @@ class Client(SyncMethodMixin):
         # removed and torn down (see distributed.worker.Worker.plugin_add()), so
         # this is effectively idempotent, i.e., forwarding the same logger twice
         # won't cause every LogRecord to be forwarded twice
-        return self.register_worker_plugin(
+        return self.register_plugin(
             ForwardLoggingPlugin(logger_name, level, topic), plugin_name
         )
 
@@ -5732,7 +5873,7 @@ def fire_and_forget(obj):
         future.client._send_to_scheduler(
             {
                 "op": "client-desires-keys",
-                "keys": [stringify(future.key)],
+                "keys": [future.key],
                 "client": "fire-and-forget",
             }
         )

@@ -14,10 +14,17 @@ import uuid
 import warnings
 import weakref
 from collections import defaultdict, deque
-from collections.abc import Callable, Container, Coroutine, Generator, Hashable
+from collections.abc import (
+    Awaitable,
+    Callable,
+    Container,
+    Coroutine,
+    Generator,
+    Hashable,
+)
 from enum import Enum
 from functools import wraps
-from typing import TYPE_CHECKING, Any, ClassVar, TypedDict, TypeVar, final
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypedDict, TypeVar, final
 
 import tblib
 from tlz import merge
@@ -641,32 +648,33 @@ class Server:
             if not pc.is_running():
                 pc.start()
 
-    def stop(self):
-        if self.__stopped:
-            return
+    def _stop_listeners(self) -> asyncio.Future:
+        listeners_to_stop: set[Awaitable] = set()
 
-        self.__stopped = True
-        _stops = set()
         for listener in self.listeners:
             future = listener.stop()
             if inspect.isawaitable(future):
-                _stops.add(future)
-            try:
-                abort_handshaking_comms = listener.abort_handshaking_comms
-            except AttributeError:
-                pass
-            else:
-                abort_handshaking_comms()
+                warnings.warn(
+                    f"{type(listener)} is using an asynchronous `stop` method. "
+                    "Support for asynchronous `Listener.stop` has been deprecated and "
+                    "will be removed in a future version",
+                    DeprecationWarning,
+                )
+                listeners_to_stop.add(future)
+            elif hasattr(listener, "abort_handshaking_comms"):
+                listener.abort_handshaking_comms()
 
-        if _stops:
+        return asyncio.gather(*listeners_to_stop)
 
-            async def background_stops():
-                await asyncio.gather(*_stops)
-
-            self._ongoing_background_tasks.call_soon(background_stops)
-
+    def stop(self) -> None:
+        if self.__stopped:
+            return
+        self.__stopped = True
         self.monitor.close()
-
+        if not (stop_listeners := self._stop_listeners()).done():
+            self._ongoing_background_tasks.call_soon(
+                asyncio.wait_for(stop_listeners, timeout=None)
+            )
         if self._workdir is not None:
             self._workdir.release()
 
@@ -1005,32 +1013,14 @@ class Server:
             await comm.close()
             assert comm.closed()
 
-    async def close(self, timeout=None, reason=""):
+    async def close(self, timeout: float | None = None, reason: str = "") -> None:
         try:
             for pc in self.periodic_callbacks.values():
                 pc.stop()
 
-            if not self.__stopped:
-                self.monitor.close()
-                self.__stopped = True
-                _stops = set()
-                for listener in self.listeners:
-                    future = listener.stop()
-                    if inspect.isawaitable(future):
-                        warnings.warn(
-                            f"{type(listener)} is using an asynchronous `stop` method. "
-                            "Support for asynchronous `Listener.stop` will be removed in a future version",
-                            PendingDeprecationWarning,
-                        )
-                        _stops.add(future)
-                    try:
-                        abort_handshaking_comms = listener.abort_handshaking_comms
-                    except AttributeError:
-                        pass
-                    else:
-                        abort_handshaking_comms()
-                if _stops:
-                    await asyncio.gather(*_stops)
+            self.__stopped = True
+            self.monitor.close()
+            await self._stop_listeners()
 
             # TODO: Deal with exceptions
             await self._ongoing_background_tasks.stop()
@@ -1738,6 +1728,10 @@ class ErrorMessage(TypedDict):
     traceback: protocol.Serialize | None
     exception_text: str
     traceback_text: str
+
+
+class OKMessage(TypedDict):
+    status: Literal["OK"]
 
 
 def error_message(e: BaseException, status: str = "error") -> ErrorMessage:

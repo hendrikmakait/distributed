@@ -3,20 +3,20 @@ from __future__ import annotations
 import logging
 import os
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, Any, Union
+from typing import TYPE_CHECKING, Any
 
 import toolz
 
 from dask.base import tokenize
 from dask.highlevelgraph import HighLevelGraph
 from dask.layers import Layer
+from dask.typing import Key
 
 from distributed.core import PooledRPCCall
-from distributed.exceptions import Reschedule
 from distributed.shuffle._arrow import (
     check_dtype_support,
     check_minimal_arrow_version,
@@ -31,8 +31,9 @@ from distributed.shuffle._core import (
     ShuffleSpec,
     barrier_key,
     get_worker_plugin,
+    handle_transfer_errors,
+    handle_unpack_errors,
 )
-from distributed.shuffle._exceptions import ShuffleClosedError
 from distributed.shuffle._limiter import ResourceLimiter
 from distributed.shuffle._scheduler_plugin import ShuffleSchedulerPlugin
 from distributed.shuffle._worker_plugin import ShuffleWorkerPlugin
@@ -55,35 +56,30 @@ def shuffle_transfer(
     input_partition: int,
     npartitions: int,
     column: str,
+    meta: pd.DataFrame,
     parts_out: set[int],
 ) -> int:
-    try:
+    with handle_transfer_errors(id):
         return get_worker_plugin().add_partition(
             input,
             input_partition,
             spec=DataFrameShuffleSpec(
-                id=id, npartitions=npartitions, column=column, parts_out=parts_out
+                id=id,
+                npartitions=npartitions,
+                column=column,
+                meta=meta,
+                parts_out=parts_out,
             ),
         )
-    except ShuffleClosedError:
-        raise Reschedule()
-    except Exception as e:
-        raise RuntimeError(f"shuffle_transfer failed during shuffle {id}") from e
 
 
 def shuffle_unpack(
-    id: ShuffleId, output_partition: int, barrier_run_id: int, meta: pd.DataFrame
+    id: ShuffleId, output_partition: int, barrier_run_id: int
 ) -> pd.DataFrame:
-    try:
+    with handle_unpack_errors(id):
         return get_worker_plugin().get_output_partition(
-            id, barrier_run_id, output_partition, meta=meta
+            id, barrier_run_id, output_partition
         )
-    except Reschedule as e:
-        raise e
-    except ShuffleClosedError:
-        raise Reschedule()
-    except Exception as e:
-        raise RuntimeError(f"shuffle_unpack failed during shuffle {id}") from e
 
 
 def shuffle_barrier(id: ShuffleId, run_ids: list[int]) -> int:
@@ -98,9 +94,15 @@ def rearrange_by_column_p2p(
     column: str,
     npartitions: int | None = None,
 ) -> DataFrame:
+    import pandas as pd
+
     from dask.dataframe.core import new_dd_object
 
     meta = df._meta
+    if not pd.api.types.is_integer_dtype(meta[column].dtype):
+        raise TypeError(
+            f"Expected meta {column=} to be an integer column, is {meta[column].dtype}."
+        )
     check_dtype_support(meta)
     npartitions = npartitions or df.npartitions
     token = tokenize(df, column, npartitions)
@@ -111,7 +113,7 @@ def rearrange_by_column_p2p(
             f"p2p requires all column names to be str, found: {unsupported}",
         )
 
-    name = f"shuffle-p2p-{token}"
+    name = f"shuffle_p2p-{token}"
     layer = P2PShuffleLayer(
         name,
         column,
@@ -128,8 +130,7 @@ def rearrange_by_column_p2p(
     )
 
 
-_T_Key: TypeAlias = Union[tuple[str, int], str]
-_T_LowLevelGraph: TypeAlias = dict[_T_Key, tuple]
+_T_LowLevelGraph: TypeAlias = dict[Key, tuple]
 
 
 class P2PShuffleLayer(Layer):
@@ -164,7 +165,7 @@ class P2PShuffleLayer(Layer):
             f"{type(self).__name__}<name='{self.name}', npartitions={self.npartitions}>"
         )
 
-    def get_output_keys(self) -> set[_T_Key]:
+    def get_output_keys(self) -> set[Key]:
         return {(self.name, part) for part in self.parts_out}
 
     def is_materialized(self) -> bool:
@@ -182,10 +183,10 @@ class P2PShuffleLayer(Layer):
             self._cached_dict = dsk
         return self._cached_dict
 
-    def __getitem__(self, key: _T_Key) -> tuple:
+    def __getitem__(self, key: Key) -> tuple:
         return self._dict[key]
 
-    def __iter__(self) -> Iterator[_T_Key]:
+    def __iter__(self) -> Iterator[Key]:
         return iter(self._dict)
 
     def __len__(self) -> int:
@@ -202,19 +203,19 @@ class P2PShuffleLayer(Layer):
             parts_out=parts_out,
         )
 
-    def _keys_to_parts(self, keys: Iterable[_T_Key]) -> set[int]:
+    def _keys_to_parts(self, keys: Iterable[Key]) -> set[int]:
         """Simple utility to convert keys to partition indices."""
         parts = set()
         for key in keys:
             if isinstance(key, tuple) and len(key) == 2:
-                _name, _part = key
-                if _name != self.name:
-                    continue
-                parts.add(_part)
+                name, part = key
+                if name == self.name:
+                    assert isinstance(part, int)
+                    parts.add(part)
         return parts
 
     def cull(
-        self, keys: Iterable[_T_Key], all_keys: Any
+        self, keys: set[Key], all_keys: Collection[Key]
     ) -> tuple[P2PShuffleLayer, dict]:
         """Cull a P2PShuffleLayer HighLevelGraph layer.
 
@@ -248,6 +249,7 @@ class P2PShuffleLayer(Layer):
                 i,
                 self.npartitions,
                 self.column,
+                self.meta_input,
                 self.parts_out,
             )
 
@@ -260,7 +262,6 @@ class P2PShuffleLayer(Layer):
                 token,
                 part_out,
                 _barrier_key,
-                self.meta_input,
             )
         return dsk
 
@@ -268,6 +269,7 @@ class P2PShuffleLayer(Layer):
 def split_by_worker(
     df: pd.DataFrame,
     column: str,
+    meta: pd.DataFrame,
     worker_for: pd.Series,
 ) -> dict[Any, pa.Table]:
     """
@@ -276,6 +278,8 @@ def split_by_worker(
     import numpy as np
 
     from dask.dataframe.dispatch import to_pyarrow_table_dispatch
+
+    df = df.astype(meta.dtypes, copy=False)
 
     # (cudf support) Avoid pd.Series
     constructor = df._constructor_sliced
@@ -383,6 +387,7 @@ class DataFrameShuffleRun(ShuffleRun[int, "pd.DataFrame"]):
         self,
         worker_for: dict[int, str],
         column: str,
+        meta: pd.DataFrame,
         id: ShuffleId,
         run_id: int,
         local_address: str,
@@ -407,6 +412,7 @@ class DataFrameShuffleRun(ShuffleRun[int, "pd.DataFrame"]):
             memory_limiter_disk=memory_limiter_disk,
         )
         self.column = column
+        self.meta = meta
         partitions_of = defaultdict(list)
         for part, addr in worker_for.items():
             partitions_of[addr].append(part)
@@ -443,20 +449,17 @@ class DataFrameShuffleRun(ShuffleRun[int, "pd.DataFrame"]):
         del data
         return {(k,): serialize_table(v) for k, v in groups.items()}
 
-    async def add_partition(
+    async def _add_partition(
         self,
         data: pd.DataFrame,
         partition_id: int,
         **kwargs: Any,
     ) -> int:
-        self.raise_if_closed()
-        if self.transferred:
-            raise RuntimeError(f"Cannot add more partitions to {self}")
-
         def _() -> dict[str, tuple[int, bytes]]:
             out = split_by_worker(
                 data,
                 self.column,
+                self.meta,
                 self.worker_for,
             )
             out = {k: (partition_id, serialize_table(t)) for k, t in out.items()}
@@ -466,28 +469,18 @@ class DataFrameShuffleRun(ShuffleRun[int, "pd.DataFrame"]):
         await self._write_to_comm(out)
         return self.run_id
 
-    async def get_output_partition(
+    async def _get_output_partition(
         self,
         partition_id: int,
         key: str,
-        meta: pd.DataFrame | None = None,
         **kwargs: Any,
     ) -> pd.DataFrame:
-        self.raise_if_closed()
-        if meta is None:
-            raise ValueError("Excepted meta keyword argument")
-        if not self.transferred:
-            raise RuntimeError("`get_output_partition` called before barrier task")
-
-        await self._ensure_output_worker(partition_id, key)
-
-        await self.flush_receive()
         try:
             data = self._read_from_disk((partition_id,))
 
-            out = await self.offload(convert_partition, data, meta)
+            out = await self.offload(convert_partition, data, self.meta)
         except KeyError:
-            out = meta.copy()
+            out = self.meta.copy()
         return out
 
     def _get_assigned_worker(self, id: int) -> str:
@@ -498,6 +491,7 @@ class DataFrameShuffleRun(ShuffleRun[int, "pd.DataFrame"]):
 class DataFrameShuffleSpec(ShuffleSpec[int]):
     npartitions: int
     column: str
+    meta: pd.DataFrame
     parts_out: set[int]
 
     def _pin_output_workers(self, plugin: ShuffleSchedulerPlugin) -> dict[int, str]:
@@ -509,6 +503,7 @@ class DataFrameShuffleSpec(ShuffleSpec[int]):
     ) -> ShuffleRun:
         return DataFrameShuffleRun(
             column=self.column,
+            meta=self.meta,
             worker_for=worker_for,
             id=self.id,
             run_id=run_id,

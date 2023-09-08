@@ -73,7 +73,7 @@ class ShuffleAnnotationChaosPlugin(SchedulerPlugin):
         assert self.scheduler
         if finish != "waiting":
             return
-        if not key.startswith("shuffle-barrier-"):
+        if not isinstance(key, str) or not key.startswith("shuffle-barrier-"):
             return
         if key in self.seen:
             return
@@ -96,4 +96,4 @@ async def invoke_annotation_chaos(rate: float, client: Client) -> None:
     if not rate:
         return
     plugin = ShuffleAnnotationChaosPlugin(rate)
-    await client.register_scheduler_plugin(plugin)
+    await client.register_plugin(plugin)
