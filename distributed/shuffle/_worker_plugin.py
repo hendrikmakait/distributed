@@ -149,6 +149,29 @@ class _ShuffleRunManager:
             raise shuffle_run._exception
         return shuffle_run
 
+    async def _fetch(
+        self,
+        shuffle_id: ShuffleId,
+        spec: ShuffleSpec | None = None,
+        key: str | None = None,
+    ) -> ShuffleRunSpec:
+        # FIXME: This should never be ToPickle[ShuffleRunSpec]
+        result: ShuffleRunSpec | ToPickle[ShuffleRunSpec]
+        if spec is None:
+            result = await self._plugin.worker.scheduler.shuffle_get(
+                id=shuffle_id,
+                worker=self._plugin.worker.address,
+            )
+        else:
+            result = await self._plugin.worker.scheduler.shuffle_get_or_create(
+                spec=ToPickle(spec),
+                key=key,
+                worker=self._plugin.worker.address,
+            )
+        if isinstance(result, ToPickle):
+            result = result.data
+        return result
+
     @overload
     async def _refresh(
         self,
@@ -171,21 +194,7 @@ class _ShuffleRunManager:
         spec: ShuffleSpec | None = None,
         key: str | None = None,
     ) -> ShuffleRun:
-        # FIXME: This should never be ToPickle[ShuffleRunSpec]
-        result: ShuffleRunSpec | ToPickle[ShuffleRunSpec]
-        if spec is None:
-            result = await self._plugin.worker.scheduler.shuffle_get(
-                id=shuffle_id,
-                worker=self._plugin.worker.address,
-            )
-        else:
-            result = await self._plugin.worker.scheduler.shuffle_get_or_create(
-                spec=ToPickle(spec),
-                key=key,
-                worker=self._plugin.worker.address,
-            )
-        if isinstance(result, ToPickle):
-            result = result.data
+        result = await self._fetch(shuffle_id=shuffle_id, spec=spec, key=key)
         if self.closed:
             raise ShuffleClosedError(f"{self} has already been closed")
         if existing := self._active_runs.get(shuffle_id, None):
