@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, overload
 
@@ -35,6 +36,7 @@ class _ShuffleRunManager:
     closed: bool
     _active_runs: dict[ShuffleId, ShuffleRun]
     _runs: set[ShuffleRun]
+    _stale_run_ids: defaultdict[ShuffleId, int]
     _runs_cleanup_condition: asyncio.Condition
     _plugin: ShuffleWorkerPlugin
 
@@ -42,6 +44,7 @@ class _ShuffleRunManager:
         self.closed = False
         self._active_runs = {}
         self._runs = set()
+        self._stale_run_ids = defaultdict(lambda: -1)
         self._runs_cleanup_condition = asyncio.Condition()
         self._plugin = plugin
 
@@ -51,6 +54,8 @@ class _ShuffleRunManager:
         }
 
     def fail(self, shuffle_id: ShuffleId, run_id: int, message: str) -> None:
+        self._stale_run_ids[shuffle_id] = max(self._stale_run_ids[shuffle_id], run_id)
+
         shuffle_run = self._active_runs.get(shuffle_id, None)
         if shuffle_run is None or shuffle_run.run_id != run_id:
             return
