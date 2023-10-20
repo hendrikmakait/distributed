@@ -44,3 +44,7 @@ class MemoryShardsBuffer(ShardsBuffer):
                 data.append(self._deserialize(shard))
 
         return data
+
+    async def close(self) -> None:
+        await super().close()
+        self._shards.clear()
