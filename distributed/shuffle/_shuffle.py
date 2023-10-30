@@ -21,6 +21,7 @@ from dask.typing import Key
 from distributed.core import PooledRPCCall
 from distributed.exceptions import Reschedule
 from distributed.shuffle._arrow import (
+    _copy_table,
     check_dtype_support,
     check_minimal_arrow_version,
     convert_shards,
@@ -326,18 +327,19 @@ def split_by_worker(
     # FIXME: If we do not preserve the index something is corrupting the
     # bytestream such that it cannot be deserialized anymore
     t = to_pyarrow_table_dispatch(df, preserve_index=True)
+    del df
     t = t.sort_by("_worker")
     codes = np.asarray(t["_worker"])
     t = t.drop(["_worker"])
-    del df
 
     splits = np.where(codes[1:] != codes[:-1])[0] + 1
     splits = np.concatenate([[0], splits])
 
     shards = [
-        t.slice(offset=a, length=b - a) for a, b in toolz.sliding_window(2, splits)
+        _copy_table(t.slice(offset=a, length=b - a))
+        for a, b in toolz.sliding_window(2, splits)
     ]
-    shards.append(t.slice(offset=splits[-1], length=None))
+    shards.append(_copy_table(t.slice(offset=splits[-1], length=None)))
 
     unique_codes = codes[splits]
     out = {
@@ -497,7 +499,7 @@ class DataFrameShuffleRun(ShuffleRun[int, "pd.DataFrame"]):
                 self.meta,
                 self.worker_for,
             )
-            out = {k: (partition_id, serialize_table(t)) for k, t in out.items()}
+            out = {k: (partition_id, t) for k, t in out.items()}
             return out
 
         out = await self.offload(_)

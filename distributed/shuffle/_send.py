@@ -10,7 +10,7 @@ from distributed.shuffle._limiter import ResourceLimiter
 from distributed.utils import log_errors
 
 
-class CommShardsBuffer(ShardsBuffer):
+class SendBuffer(ShardsBuffer):
     """Accept, buffer, and send many small messages to many workers
 
     This takes in lots of small messages destined for remote workers, buffers
@@ -59,7 +59,7 @@ class CommShardsBuffer(ShardsBuffer):
         super().__init__(
             memory_limiter=memory_limiter,
             concurrency_limit=concurrency_limit,
-            max_message_size=CommShardsBuffer.max_message_size,
+            max_message_size=SendBuffer.max_message_size,
         )
         self.send = send
 
