@@ -22,6 +22,7 @@ from dask.typing import Key
 from distributed.core import PooledRPCCall
 from distributed.exceptions import Reschedule
 from distributed.shuffle._arrow import (
+    _copy_table,
     check_dtype_support,
     check_minimal_arrow_version,
     deserialize_table,
@@ -364,9 +365,10 @@ def split_by_partition(t: pa.Table, column: str) -> dict[int, pa.Table]:
     splits = np.concatenate([[0], splits])
 
     shards = [
-        t.slice(offset=a, length=b - a) for a, b in toolz.sliding_window(2, splits)
+        _copy_table(t.slice(offset=a, length=b - a))
+        for a, b in toolz.sliding_window(2, splits)
     ]
-    shards.append(t.slice(offset=splits[-1], length=None))
+    shards.append(_copy_table(t.slice(offset=splits[-1], length=None)))
     assert len(t) == sum(map(len, shards))
     assert len(partitions) == len(shards)
     return dict(zip(partitions, shards))
