@@ -493,7 +493,7 @@ class WorkerState:
     extra: dict[str, Any]
 
     # The unique server ID this WorkerState is referencing
-    server_id: str
+    server_id: uuid.UUID
 
     # Reference to scheduler task_groups
     scheduler_ref: weakref.ref[SchedulerState] | None
@@ -521,7 +521,7 @@ class WorkerState:
         memory_limit: int,
         local_directory: str,
         nanny: str,
-        server_id: str,
+        server_id: uuid.UUID,
         services: dict[str, int] | None = None,
         versions: dict[str, Any] | None = None,
         extra: dict[str, Any] | None = None,
@@ -3900,7 +3900,7 @@ class Scheduler(SchedulerState, ServerNode):
         """Basic information about ourselves and our cluster"""
         d = {
             "type": type(self).__name__,
-            "id": str(self.id),
+            "id": self.id,
             "address": self.address,
             "services": {key: v.port for (key, v) in self.services.items()},
             "started": self.time_started,
@@ -4287,7 +4287,7 @@ class Scheduler(SchedulerState, ServerNode):
         *,
         address: str,
         status: str,
-        server_id: str,
+        server_id: uuid.UUID,
         nthreads: int,
         name: str,
         resolve_address: bool = True,

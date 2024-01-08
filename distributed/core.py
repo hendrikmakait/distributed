@@ -321,7 +321,7 @@ class Server:
     default_ip: ClassVar[str] = ""
     default_port: ClassVar[int] = 0
 
-    id: str
+    id: uuid.UUID
     blocked_handlers: list[str]
     handlers: dict[str, Callable]
     stream_handlers: dict[str, Callable]
@@ -437,7 +437,7 @@ class Server:
         self.stream_handlers = {}
         self.stream_handlers.update(stream_handlers or {})
 
-        self.id = type(self).__name__ + "-" + str(uuid.uuid4())
+        self.id = uuid.uuid4()
         self._address = None
         self._listen_address = None
         self._port = None
@@ -819,7 +819,7 @@ class Server:
             self._host, self._port = get_address_host_port(self.address)
         return self._port
 
-    def identity(self) -> dict[str, str]:
+    def identity(self) -> dict[str, str | uuid.UUID]:
         return {"type": type(self).__name__, "id": self.id}
 
     def _to_dict(self, *, exclude: Container[str] = ()) -> dict[str, Any]:
