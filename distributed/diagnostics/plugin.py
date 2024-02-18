@@ -11,6 +11,7 @@ import sys
 import tempfile
 import uuid
 import zipfile
+from collections import defaultdict
 from collections.abc import Awaitable
 from typing import TYPE_CHECKING, Any, Callable, ClassVar
 
@@ -367,6 +368,52 @@ class SchedulerUploadFile(SchedulerPlugin):
 
     async def start(self, scheduler: Scheduler) -> None:
         await scheduler.upload_file(self.filename, self.data, load=self.load)
+
+
+class ResultSizeTracker(SchedulerPlugin):
+    idempotent = True
+    name: ClassVar[str] = "result_size_tracker"
+
+    _digests: defaultdict
+    _scheduler: Scheduler
+
+    def __init__(self) -> None:
+        import crick  # noqa: F401
+
+    async def start(self, scheduler: Scheduler) -> None:
+        from crick import TDigest
+
+        self._digests = defaultdict(TDigest)
+        self._scheduler = scheduler
+
+        self._scheduler.handlers["result_sizes"] = self.handle_result_sizes
+
+    def handle_result_sizes(self):
+        return dict(self._digests)
+
+    def transition(
+        self,
+        key: Key,
+        start: SchedulerTaskStateState,
+        finish: SchedulerTaskStateState,
+        *args: Any,
+        stimulus_id: str,
+        **kwargs: Any,
+    ) -> None:
+        if finish != "memory":
+            return
+        if start != "processing":
+            return
+
+        ts = self._scheduler.tasks[key]
+        assert ts.nbytes is not None
+        self._digests[ts.group_key].add(ts.nbytes)
+
+    async def close(self) -> None:
+        await self._scheduler.unregister_worker_plugin(comm=None, name=self.name)
+
+    def restart(self, scheduler: Scheduler) -> None:
+        self._digests.clear()
 
 
 class InstallPlugin(SchedulerPlugin):
