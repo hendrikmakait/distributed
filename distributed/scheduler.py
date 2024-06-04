@@ -17,7 +17,7 @@ import textwrap
 import uuid
 import warnings
 import weakref
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from collections.abc import (
     Callable,
     Collection,
@@ -4543,11 +4543,6 @@ class Scheduler(SchedulerState, ServerNode):
 
         lost_keys = self._match_graph_with_tasks(dsk, dependencies, keys)
 
-        if len(dsk) > 1:
-            self.log_event(
-                ["all", client], {"action": "update_graph", "count": len(dsk)}
-            )
-
         if lost_keys:
             self.report({"op": "cancelled-keys", "keys": lost_keys}, client=client)
             self.client_releases_keys(
@@ -4569,7 +4564,12 @@ class Scheduler(SchedulerState, ServerNode):
             computation.annotations.update(global_annotations)
         del global_annotations
 
-        runnable, touched_tasks, new_tasks = self._generate_taskstates(
+        (
+            runnable,
+            touched_tasks,
+            new_tasks,
+            tgs_with_key_collisions,
+        ) = self._generate_taskstates(
             keys=keys,
             dsk=dsk,
             dependencies=dependencies,
@@ -4580,6 +4580,18 @@ class Scheduler(SchedulerState, ServerNode):
             tasks=new_tasks,
             annotations_by_type=annotations_by_type,
         )
+
+        if len(dsk) > 1:
+            self.log_event(
+                ["all", client],
+                {
+                    "action": "update_graph",
+                    "count": len(dsk),
+                    "new_tasks": len(new_tasks),
+                    "touched_tasks": len(touched_tasks),
+                    "task_groups_with_key_collisions": tgs_with_key_collisions,
+                },
+            )
 
         self._set_priorities(
             internal_priority=ordered,
@@ -4767,7 +4779,7 @@ class Scheduler(SchedulerState, ServerNode):
         stack = list(keys)
         touched_keys = set()
         touched_tasks = []
-        tgs_with_bad_run_spec = set()
+        tgs_with_key_collisions: Counter[str] = Counter()
         while stack:
             k = stack.pop()
             if k in touched_keys:
@@ -4813,8 +4825,7 @@ class Scheduler(SchedulerState, ServerNode):
                     # dask/dask#9888.
                     dependencies[k] = deps_lhs
 
-                    if ts.group not in tgs_with_bad_run_spec:
-                        tgs_with_bad_run_spec.add(ts.group)
+                    if ts.group.name not in tgs_with_key_collisions:
                         logger.warning(
                             f"Detected different `run_spec` for key {ts.key!r} between "
                             "two consecutive calls to `update_graph`. "
@@ -4843,7 +4854,7 @@ class Scheduler(SchedulerState, ServerNode):
                             f"Detected different `run_spec` for key {ts.key!r} between "
                             "two consecutive calls to `update_graph`."
                         )
-
+                    tgs_with_key_collisions[ts.group.name] += 1
             if ts.run_spec:
                 runnable.append(ts)
             touched_keys.add(k)
@@ -4865,7 +4876,7 @@ class Scheduler(SchedulerState, ServerNode):
                 len(touched_tasks),
                 len(keys),
             )
-        return runnable, touched_tasks, new_tasks
+        return runnable, touched_tasks, new_tasks, tgs_with_key_collisions
 
     def _apply_annotations(
         self,
