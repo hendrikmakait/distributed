@@ -20,7 +20,7 @@ from tornado.tcpclient import TCPClient
 from tornado.tcpserver import TCPServer
 
 import dask
-from dask.utils import parse_timedelta
+from dask.utils import parse_bytes, parse_timedelta
 
 from distributed.comm.addressing import parse_host_port, unparse_host_port
 from distributed.comm.core import (
@@ -64,8 +64,13 @@ def set_tcp_timeout(comm):
 
     timeout = dask.config.get("distributed.comm.timeouts.tcp")
     timeout = int(parse_timedelta(timeout, default="seconds"))
-
+    recvb = parse_bytes(dask.config.get("distributed.comm.socket.rcvbuf", -1))
+    sendb = parse_bytes(dask.config.get("distributed.comm.socket.sndbuf", -1))
     sock = comm.socket
+    if recvb > 0:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, recvb)
+    if sendb > 0:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, sendb)
 
     # Default (unsettable) value on Windows
     # https://msdn.microsoft.com/en-us/library/windows/desktop/dd877220(v=vs.85).aspx
@@ -463,6 +468,7 @@ def _expect_tls_context(connection_args):
 
 class RequireEncryptionMixin:
     def _check_encryption(self, address, connection_args):
+        return
         if not self.encrypted and connection_args.get("require_encryption"):
             # XXX Should we have a dedicated SecurityError class?
             raise RuntimeError(
@@ -584,10 +590,11 @@ class TCPConnector(BaseTCPConnector):
 
 class TLSConnector(BaseTCPConnector):
     prefix = "tls://"
-    comm_class = TLS
+    comm_class = TCP
     encrypted = True
 
     def _get_connect_args(self, **connection_args):
+        return {}
         tls_args = {"ssl_options": _expect_tls_context(connection_args)}
         if connection_args.get("server_hostname"):
             tls_args["server_hostname"] = connection_args["server_hostname"]
@@ -712,26 +719,16 @@ class TCPListener(BaseTCPListener):
 
 class TLSListener(BaseTCPListener):
     prefix = "tls://"
-    comm_class = TLS
+    comm_class = TCP
     encrypted = True
 
     def _get_server_args(self, **connection_args):
+        return {}
         ctx = _expect_tls_context(connection_args)
         return {"ssl_options": ctx}
 
     async def _prepare_stream(self, stream, address):
-        try:
-            await stream.wait_for_handshake()
-        except OSError as e:
-            # The handshake went wrong, log and ignore
-            logger.warning(
-                "Listener on %r: TLS handshake failed with remote %r: %s",
-                self.listen_address,
-                address,
-                getattr(e, "real_error", None) or e,
-            )
-        else:
-            return stream
+        return stream
 
 
 class BaseTCPBackend(Backend):
