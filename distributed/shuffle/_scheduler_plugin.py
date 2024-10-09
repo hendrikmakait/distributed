@@ -71,6 +71,8 @@ class ShuffleSchedulerPlugin(SchedulerPlugin):
         self._shuffles = defaultdict(set)
         self._archived_by_stimulus = defaultdict(set)
         self._shift_counter = itertools.count()
+        self._get_or_create_counter = 0
+        self._get_counter = 0
 
     async def start(self, scheduler: Scheduler) -> None:
         worker_plugin = ShuffleWorkerPlugin()
@@ -126,6 +128,7 @@ class ShuffleSchedulerPlugin(SchedulerPlugin):
                 self.heartbeats[shuffle_id][ws.address].update(d)
 
     def get(self, id: ShuffleId, worker: str) -> RunSpecMessage | ErrorMessage:
+        self._get_counter += 1
         try:
             try:
                 run_spec = self._get(id, worker)
@@ -175,6 +178,7 @@ class ShuffleSchedulerPlugin(SchedulerPlugin):
         key: Key,
         worker: str,
     ) -> RunSpecMessage | ErrorMessage:
+        self._get_or_create_counter += 1
         try:
             run_spec = self._get(spec.id, worker)
         except P2PConsistencyError as e:

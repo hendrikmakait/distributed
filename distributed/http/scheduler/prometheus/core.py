@@ -213,6 +213,20 @@ class SchedulerMetricCollector(PrometheusCollector):
 
         self.server.digests_max.clear()
 
+        p2p_plugin = self.server.plugins.get("shuffle", None)
+        if p2p_plugin:
+            yield CounterMetricFamily(
+                self.build_name("p2p_get_or_create_counter"),
+                "Total number of get_or_create requests to P2P scheduler plugin",
+                value=p2p_plugin._get_or_create_counter,  # type: ignore[attr-defined]
+            )
+
+            yield CounterMetricFamily(
+                self.build_name("p2p_get_counter"),
+                "Total number of get requests to P2P scheduler plugin",
+                value=p2p_plugin._get_counter,  # type: ignore[attr-defined]
+            )
+
 
 COLLECTORS = [
     SchedulerMetricCollector,
