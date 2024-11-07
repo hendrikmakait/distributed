@@ -31,8 +31,18 @@ from collections.abc import (
     Set,
 )
 from contextlib import suppress
-from functools import partial
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, NamedTuple, cast, overload
+from functools import partial, wraps
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    Literal,
+    NamedTuple,
+    ParamSpec,
+    TypeVar,
+    cast,
+    overload,
+)
 
 import psutil
 import tornado.web
@@ -131,6 +141,7 @@ from distributed.utils import (
     TimeoutError,
     format_dashboard_link,
     get_fileno_limit,
+    iscoroutinefunction,
     key_split_group,
     log_errors,
     offload,
@@ -150,6 +161,9 @@ if TYPE_CHECKING:
     from typing_extensions import Self, TypeAlias
 
     from dask.highlevelgraph import HighLevelGraph
+
+    P = ParamSpec("P")
+    T = TypeVar("T")
 
 # Not to be confused with distributed.worker_state_machine.TaskStateState
 TaskStateState: TypeAlias = Literal[
@@ -197,6 +211,78 @@ DEFAULT_EXTENSIONS = {
     "spans": SpansSchedulerExtension,
     "stealing": WorkStealing,
 }
+
+
+def fail_hard(method: Callable[P, T]) -> Callable[P, T]:
+    """
+    Decorator to close the scheduler if this method encounters an exception.
+    """
+    reason = f"scheduler-{method.__name__}-fail-hard"
+    if iscoroutinefunction(method):
+
+        @wraps(method)
+        async def wrapper(  # type:ignore[no-untyped-def]
+            self, *args: P.args, **kwargs: P.kwargs
+        ) -> Any:
+            try:
+                return await method(self, *args, **kwargs)  # type: ignore
+            except Exception as e:
+                if self.status not in (Status.closed, Status.closing):
+                    self.log_event("scheduler-fail-hard", error_message(e))
+                    logger.exception(e)
+                await _force_close(self, reason)
+                raise
+
+    else:
+
+        @wraps(method)
+        def wrapper(  # type:ignore[no-untyped-def]
+            self, *args: P.args, **kwargs: P.kwargs
+        ) -> T:
+            try:
+                return method(self, *args, **kwargs)
+            except Exception as e:
+                if self.status not in (Status.closed, Status.closing):
+                    self.log_event("scheduler-fail-hard", error_message(e))
+                    logger.exception(e)
+                self.loop.add_callback(_force_close, self, reason)
+                raise
+
+    return wrapper  # type: ignore
+
+
+async def _force_close(self, reason: str) -> None:  # type:ignore[no-untyped-def]
+    """
+    Used with the fail_hard decorator defined above
+
+    1.  Wait for the scheduler to close
+    2.  If it doesn't, log and kill the process
+    """
+    try:
+        await wait_for(
+            self.close(reason=reason),
+            30,
+        )
+    except (KeyboardInterrupt, SystemExit):  # pragma: nocover
+        raise
+    except BaseException:  # pragma: nocover
+        # Scheduler is in a very broken state if closing fails. We need to shut down
+        # immediately, to ensure that the scheduler does not potentially
+        # deadlock the cluster.
+        from distributed import Worker
+
+        if Worker._instances:
+            # We're likely in a unit test. Don't kill the whole test suite!
+            raise
+
+        logger.critical(
+            "Error trying close scheduler in response to broken internal state. "
+            "Forcibly exiting scheduler NOW",
+            exc_info=True,
+        )
+        # use `os._exit` instead of `sys.exit` because of uncertainty
+        # around propagating `SystemExit` from asyncio callbacks
+        os._exit(1)
 
 
 class ClientState:
@@ -5247,6 +5333,7 @@ class Scheduler(SchedulerState, ServerNode):
                 assert qts.state == "processing"
                 assert not self.queued or self.queued.peek() != qts
 
+    @fail_hard
     def stimulus_task_finished(
         self, key: Key, worker: str, stimulus_id: str, run_id: int, **kwargs: Any
     ) -> RecsMsgs:
@@ -5316,6 +5403,7 @@ class Scheduler(SchedulerState, ServerNode):
 
         return recommendations, client_msgs, worker_msgs
 
+    @fail_hard
     def stimulus_task_erred(
         self,
         key=None,
@@ -6019,6 +6107,7 @@ class Scheduler(SchedulerState, ServerNode):
     def handle_uncaught_error(self, **msg: Any) -> None:
         logger.exception(clean_exception(**msg)[1])
 
+    @fail_hard
     def handle_task_finished(
         self, key: Key, worker: str, stimulus_id: str, **msg: Any
     ) -> None:
@@ -6036,6 +6125,7 @@ class Scheduler(SchedulerState, ServerNode):
 
         self.stimulus_queue_slots_maybe_opened(stimulus_id=stimulus_id)
 
+    @fail_hard
     def handle_task_erred(self, key: Key, stimulus_id: str, **msg: Any) -> None:
         r: tuple = self.stimulus_task_erred(key=key, stimulus_id=stimulus_id, **msg)
         recommendations, client_msgs, worker_msgs = r
@@ -8188,6 +8278,7 @@ class Scheduler(SchedulerState, ServerNode):
         )
         return responses
 
+    @fail_hard
     def transition(
         self,
         key: Key,
@@ -8216,6 +8307,7 @@ class Scheduler(SchedulerState, ServerNode):
         self.send_all(client_msgs, worker_msgs)
         return recommendations
 
+    @fail_hard
     def transitions(self, recommendations: Recs, stimulus_id: str) -> None:
         """Process transitions until none are left
 

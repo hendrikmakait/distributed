@@ -18,6 +18,7 @@ from dask.utils import parse_timedelta
 from distributed.compatibility import PeriodicCallback
 from distributed.core import CommClosedError
 from distributed.diagnostics.plugin import SchedulerPlugin
+from distributed.scheduler import fail_hard
 from distributed.utils import log_errors, recursive_to_dict
 
 if TYPE_CHECKING:
@@ -331,6 +332,7 @@ class WorkStealing(SchedulerPlugin):
                 pdb.set_trace()
             raise
 
+    @fail_hard
     def move_task_confirm(
         self, *, key: str, state: str, stimulus_id: str, worker: str | None = None
     ) -> None:
