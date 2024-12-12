@@ -294,7 +294,8 @@ class ShuffleSchedulerPlugin(SchedulerPlugin):
         # of this method... until the set of available workers changes between the two
         # calls, which would cause misaligned shuffle outputs and a deadlock.
         seen = {barrier}
-        for dependent in barrier.dependents:
+        # FIXME: We probably want to switch the order here if dependencies remains a set[TaskState]
+        for dependent in barrier.dependents(self.scheduler):
             for possible_barrier in dependent.dependencies:
                 if possible_barrier in seen:
                     continue
@@ -349,7 +350,7 @@ class ShuffleSchedulerPlugin(SchedulerPlugin):
         ShuffleRun._ensure_output_worker
         """
         barrier = self.scheduler.tasks[barrier_key(spec.id)]
-        for dependent in barrier.dependents:
+        for dependent in barrier.dependents(self.scheduler):
             dependent._queueable = False
 
     @log_errors()
@@ -383,7 +384,7 @@ class ShuffleSchedulerPlugin(SchedulerPlugin):
         barrier_task = self.scheduler.tasks[barrier_key(id)]
         recs: Recs = {}
 
-        for dt in barrier_task.dependents:
+        for dt in barrier_task.dependents(self.scheduler):
             if dt.state == "erred":
                 return {}
             recs.update({dt.key: "released"})
@@ -475,7 +476,7 @@ class ShuffleSchedulerPlugin(SchedulerPlugin):
                 barrier = self.scheduler.tasks[barrier_key(active_shuffle.id)]
                 if (
                     ts == barrier
-                    or ts in barrier.dependents
+                    or ts.key in barrier.dependent_keys
                     or ts in barrier.dependencies
                 ):
                     active_shuffle._failed = True
@@ -547,7 +548,7 @@ class ShuffleSchedulerPlugin(SchedulerPlugin):
             del self.heartbeats[id]
 
         barrier_task = self.scheduler.tasks[barrier_key(id)]
-        for dt in barrier_task.dependents:
+        for dt in barrier_task.dependents(self.scheduler):
             self._unset_restriction(dt)
 
     def restart(self, scheduler: Scheduler) -> None:

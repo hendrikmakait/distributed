@@ -93,7 +93,7 @@
             <th> Key </th>
             <th> State </th>
           </thead>
-          {% for dts in ts.dependents %}
+          {% for dts in ts.dependents(scheduler) %}
           <tr>
             <td> <a href="{{ url_escape(str(dts.key)) }}.html">{{dts.key}}</a> </td>
             <td> {{ dts.state }} </td>

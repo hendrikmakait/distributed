@@ -23,6 +23,7 @@ from collections.abc import (
     Callable,
     Collection,
     Container,
+    Generator,
     Hashable,
     Iterable,
     Iterator,
@@ -1251,9 +1252,9 @@ class TaskState:
     #: is tracked by progressively draining the :attr:`waiting_on` set.
     dependencies: set[TaskState]
 
-    #: The set of tasks which depend on this task.  Only tasks still alive are listed in
+    #: The keys of tasks which depend on this task.  Only tasks still alive are listed in
     #: this set. This is the reverse mapping of :attr:`dependencies`.
-    dependents: set[TaskState]
+    dependent_keys: set[Key]
 
     #: Whether any of the dependencies of this task has been forgotten. For memory
     #: consumption reasons, forgotten tasks are not kept in memory even though they may
@@ -1450,7 +1451,7 @@ class TaskState:
         self.priority = None
         self.who_wants = None
         self.dependencies = set()
-        self.dependents = set()
+        self.dependent_keys = set()
         self.waiting_on = None
         self.waiters = None
         self.who_has = None
@@ -1505,7 +1506,7 @@ class TaskState:
         """Add another task as a dependency of this task"""
         self.dependencies.add(other)
         self.group.dependencies.add(other.group)
-        other.dependents.add(self)
+        other.dependent_keys.add(self.key)
 
     def get_nbytes(self) -> int:
         return self.nbytes if self.nbytes >= 0 else DEFAULT_DATA_SIZE
@@ -1529,8 +1530,11 @@ class TaskState:
             nbytes=self.nbytes,
             key=str(self.key),
         )
+    
+    def dependents(self, scheduler: SchedulerState) -> Generator[TaskState]:
+        return (scheduler.tasks[key] for key in self.dependent_keys)
 
-    def validate(self) -> None:
+    def validate(self, scheduler: SchedulerState) -> None:
         try:
             for cs in self.who_wants or ():
                 assert isinstance(cs, ClientState), (repr(cs), self.who_wants)
@@ -1538,9 +1542,9 @@ class TaskState:
                 assert isinstance(ws, WorkerState), (repr(ws), self.who_has)
             for ts in self.dependencies:
                 assert isinstance(ts, TaskState), (repr(ts), self.dependencies)
-            for ts in self.dependents:
-                assert isinstance(ts, TaskState), (repr(ts), self.dependents)
-            validate_task_state(self)
+            for ts in self.dependents(scheduler):
+                assert isinstance(ts, TaskState), (repr(ts), self.dependent_keys)
+            validate_task_state(self, scheduler)
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
@@ -1999,7 +2003,7 @@ class SchedulerState:
             client_msgs: Msgs = {}
 
             if self.plugins:
-                dependents = set(ts.dependents)
+                dependent_keys = set(ts.dependent_keys)
                 dependencies = set(ts.dependencies)
 
             func = self._TRANSITIONS_TABLE.get((start, finish))
@@ -2063,7 +2067,7 @@ class SchedulerState:
             if self.plugins:
                 # Temporarily put back forgotten key for plugin to retrieve it
                 if ts._state == "forgotten":
-                    ts.dependents = dependents
+                    ts.dependent_keys = dependent_keys
                     ts.dependencies = dependencies
                     self.tasks[ts.key] = ts
                 for plugin in list(self.plugins.values()):
@@ -2169,7 +2173,7 @@ class SchedulerState:
                     dts.waiters = set()
                 dts.waiters.add(ts)
 
-        ts.waiters = {dts for dts in ts.dependents if dts.state == "waiting"}
+        ts.waiters = {dts for dts in ts.dependents(self) if dts.state == "waiting"}
 
         if not ts.waiting_on:
             # NOTE: waiting->processing will send tasks to queued or no-worker as
@@ -2635,7 +2639,7 @@ class SchedulerState:
         failing_ts = ts.exception_blame
         assert failing_ts
 
-        for dts in ts.dependents:
+        for dts in ts.dependents(self):
             if not dts.who_has:
                 dts.exception_blame = failing_ts
                 recommendations[dts.key] = "erred"
@@ -2670,7 +2674,7 @@ class SchedulerState:
         ts.exception_blame = None
         ts.traceback = None
 
-        for dts in ts.dependents:
+        for dts in ts.dependents(self):
             if dts.state == "erred":
                 # Does this make sense?
                 # This goes via released
@@ -2978,7 +2982,7 @@ class SchedulerState:
             elif ts.has_lost_dependencies:
                 # It's ok to forget a task with forgotten dependencies
                 pass
-            elif not ts.who_wants and not ts.waiters and not ts.dependents:
+            elif not ts.who_wants and not ts.waiters and not ts.dependent_keys:
                 # It's ok to forget a task that nobody needs
                 pass
             else:
@@ -3012,7 +3016,7 @@ class SchedulerState:
             elif ts.has_lost_dependencies:
                 # It's ok to forget a task with forgotten dependencies
                 pass
-            elif not ts.who_wants and not ts.waiters and not ts.dependents:
+            elif not ts.who_wants and not ts.waiters and not ts.dependent_keys:
                 # It's ok to forget a task that nobody needs
                 pass
             else:
@@ -3443,7 +3447,7 @@ class SchedulerState:
 
         self.add_replica(ts, ws)
 
-        deps = list(ts.dependents)
+        deps = list(ts.dependents(self))
         if len(deps) > 1:
             deps.sort(key=operator.attrgetter("priority"), reverse=True)
 
@@ -3512,7 +3516,7 @@ class SchedulerState:
         stimulus_id: str,
     ) -> None:
         ts.state = "forgotten"
-        for dts in ts.dependents:
+        for dts in ts.dependents(self):
             dts.has_lost_dependencies = True
             dts.dependencies.remove(ts)
             if dts.waiting_on:
@@ -3520,14 +3524,14 @@ class SchedulerState:
             if dts.state not in ("memory", "erred"):
                 # Cannot compute task anymore
                 recommendations[dts.key] = "forgotten"
-        ts.dependents.clear()
+        ts.dependent_keys.clear()
         ts.waiters = None
 
         for dts in ts.dependencies:
-            dts.dependents.remove(ts)
+            dts.dependent_keys.remove(ts.key)
             if dts.waiters:
                 dts.waiters.discard(ts)
-            if not dts.dependents and not dts.who_wants:
+            if not dts.dependent_keys and not dts.who_wants:
                 # Task not needed anymore
                 assert dts is not ts
                 recommendations[dts.key] = "forgotten"
@@ -3560,7 +3564,7 @@ class SchedulerState:
                 if ts.who_wants:
                     ts.who_wants.remove(cs)
                 if not ts.who_wants:
-                    if not ts.dependents:
+                    if not ts.dependent_keys:
                         # No live dependents, can forget
                         recommendations[ts.key] = "forgotten"
                     elif ts.state != "erred" and not ts.waiters:
@@ -5615,9 +5619,9 @@ class Scheduler(SchedulerState, ServerNode):
                 continue
 
             if force or ts.who_wants == {cs}:  # no one else wants this key
-                if ts.dependents:
+                if ts.dependent_keys:
                     self.stimulus_cancel(
-                        [dts.key for dts in ts.dependents], client, force=force
+                        list(ts.dependent_keys), client, force=force
                     )
                 logger.info("Scheduler cancels key %s.  Force=%s", key, force)
                 cancelled_keys.append(key)
@@ -5730,7 +5734,7 @@ class Scheduler(SchedulerState, ServerNode):
         assert not ts.waiting_on
         assert ts not in self.unrunnable
         assert ts not in self.queued
-        for dts in ts.dependents:
+        for dts in ts.dependents(self):
             assert (dts in (ts.waiters or ())) == (
                 dts.state in ("waiting", "queued", "processing", "no-worker")
             )
@@ -5760,7 +5764,7 @@ class Scheduler(SchedulerState, ServerNode):
             if ts is None:
                 logger.debug("Key lost: %s", key)
             else:
-                ts.validate()
+                ts.validate(self)
                 try:
                     func = getattr(self, "validate_" + ts.state.replace("-", "_"))
                 except AttributeError:
@@ -5778,7 +5782,7 @@ class Scheduler(SchedulerState, ServerNode):
             raise
 
     def validate_state(self, allow_overlap: bool = False) -> None:
-        validate_state(self.tasks, self.workers, self.clients)
+        validate_state(self, self.tasks, self.workers, self.clients)
         validate_unrunnable(self.unrunnable)
 
         if not (set(self.workers) == set(self.stream_comms)):
@@ -9028,7 +9032,7 @@ def decide_worker(
         return min(candidates, key=objective)
 
 
-def validate_task_state(ts: TaskState) -> None:
+def validate_task_state(ts: TaskState, scheduler: SchedulerState) -> None:
     """Validate the given TaskState"""
     assert ts.state in ALL_TASK_STATES, ts
 
@@ -9039,7 +9043,7 @@ def validate_task_state(ts: TaskState) -> None:
             str(ts.dependencies),
         )
     if ts.waiters:
-        assert ts.waiters.issubset(ts.dependents), (
+        assert ts.waiters.issubset(ts.dependents(scheduler)), (
             "waiters not subset of dependents",
             str(ts.waiters),
             str(ts.dependents),
@@ -9049,11 +9053,11 @@ def validate_task_state(ts: TaskState) -> None:
         assert not dts.who_has, ("waiting on in-memory dep", str(ts), str(dts))
         assert dts.state != "released", ("waiting on released dep", str(ts), str(dts))
     for dts in ts.dependencies:
-        assert ts in dts.dependents, (
+        assert ts.key in dts.dependent_keys, (
             "not in dependency's dependents",
             str(ts),
             str(dts),
-            str(dts.dependents),
+            str(dts.dependent_keys),
         )
         if ts.state in ("waiting", "queued", "processing", "no-worker"):
             assert ts.waiting_on and dts in ts.waiting_on or dts.who_has, (
@@ -9069,7 +9073,7 @@ def validate_task_state(ts: TaskState) -> None:
             str(ts),
             str(dts),
         )
-    for dts in ts.dependents:
+    for dts in ts.dependents(scheduler):
         assert ts in dts.dependencies, (
             "not in dependent's dependencies",
             str(ts),
@@ -9110,7 +9114,7 @@ def validate_task_state(ts: TaskState) -> None:
         assert not any(
             [
                 ts in dts.waiting_on
-                for dts in ts.dependents
+                for dts in ts.dependents(scheduler)
                 if dts.waiting_on is not None
             ]
         )
@@ -9174,6 +9178,7 @@ def validate_worker_state(ws: WorkerState) -> None:
 
 
 def validate_state(
+    scheduler: Scheduler,
     tasks: dict[Key, TaskState],
     workers: dict[str, WorkerState],
     clients: dict[str, ClientState],
@@ -9184,7 +9189,7 @@ def validate_state(
     time. This raises assert errors if anything doesn't check out.
     """
     for ts in tasks.values():
-        validate_task_state(ts)
+        validate_task_state(ts, scheduler)
 
     for ws in workers.values():
         validate_worker_state(ws)

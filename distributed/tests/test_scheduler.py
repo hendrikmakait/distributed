@@ -4361,7 +4361,7 @@ async def test_TaskState__to_dict(c, s):
     assert isinstance(tasks["x"], dict)
     assert isinstance(tasks["y"], dict)
     assert isinstance(tasks["z"], dict)
-    assert tasks["x"]["dependents"] == ["<TaskState 'y' waiting>"]
+    assert tasks["x"]["dependent_keys"] == ["y"]
     assert tasks["y"]["dependencies"] == ["<TaskState 'x' queued>"]
 
 

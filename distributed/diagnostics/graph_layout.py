@@ -70,10 +70,10 @@ class GraphLayout(SchedulerPlugin):
                     continue
                 else:
                     total_deps = sum(
-                        len(scheduler.tasks[dep].dependents) for dep in deps
+                        len(scheduler.tasks[dep].dependent_keys) for dep in deps
                     )
                     y = sum(
-                        self.y[dep] * len(scheduler.tasks[dep].dependents) / total_deps
+                        self.y[dep] * len(scheduler.tasks[dep].dependent_keys) / total_deps
                         for dep in deps
                     )
                     x = max(self.x[dep] for dep in deps) + 1
@@ -107,8 +107,8 @@ class GraphLayout(SchedulerPlugin):
         else:
             self.visible_updates.append((self.index[key], "False"))
             task = self.scheduler.tasks[key]
-            for dep in task.dependents:
-                edge = (key, dep.key)
+            for dep in task.dependent_keys:
+                edge = (key, dep)
                 self.visible_edge_updates.append((self.index_edge.pop(edge), "False"))
             for dep in task.dependencies:
                 self.visible_edge_updates.append(

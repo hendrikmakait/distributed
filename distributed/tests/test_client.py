@@ -2163,7 +2163,7 @@ async def test_forget_simple(c, s, a, b):
 
     assert x.key not in s.tasks
     assert z.key not in s.tasks
-    assert not s.tasks[y.key].dependents
+    assert not s.tasks[y.key].dependent_keys
 
     s.client_releases_keys(keys=[y.key], client=c.id)
     assert not s.tasks

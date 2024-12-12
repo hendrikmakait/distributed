@@ -235,13 +235,13 @@ async def test_future_dependencies(c, s, a, b):
     await x
 
     assert {ts.key for ts in s.tasks[x.key].dependencies} == {counter.key}
-    assert {ts.key for ts in s.tasks[counter.key].dependents} == {x.key}
+    assert s.tasks[counter.key].dependent_keys == {x.key}
 
     y = c.submit(f, counter, workers=[a.address], pure=False)
     await y
 
     assert {ts.key for ts in s.tasks[y.key].dependencies} == {counter.key}
-    assert {ts.key for ts in s.tasks[counter.key].dependents} == {x.key, y.key}
+    assert s.tasks[counter.key].dependent_keys == {x.key, y.key}
 
 
 def test_sync(client):
